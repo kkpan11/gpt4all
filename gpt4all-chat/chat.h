@@ -27,7 +27,7 @@ class Chat : public QObject
     Q_PROPERTY(QString response READ response NOTIFY responseChanged)
     Q_PROPERTY(ModelInfo modelInfo READ modelInfo WRITE setModelInfo NOTIFY modelInfoChanged)
     Q_PROPERTY(bool responseInProgress READ responseInProgress NOTIFY responseInProgressChanged)
-    Q_PROPERTY(bool isRecalc READ isRecalc NOTIFY recalcChanged)
+    Q_PROPERTY(bool restoringFromText READ restoringFromText NOTIFY restoringFromTextChanged)
     Q_PROPERTY(bool isServer READ isServer NOTIFY isServerChanged)
     Q_PROPERTY(ResponseState responseState READ responseState NOTIFY responseStateChanged)
     Q_PROPERTY(QList<QString> collectionList READ collectionList NOTIFY collectionListChanged)
@@ -39,6 +39,7 @@ class Chat : public QObject
     Q_PROPERTY(LocalDocsCollectionsModel *collectionModel READ collectionModel NOTIFY collectionModelChanged)
     // 0=no, 1=waiting, 2=working
     Q_PROPERTY(int trySwitchContextInProgress READ trySwitchContextInProgress NOTIFY trySwitchContextInProgressChanged)
+    Q_PROPERTY(QList<QString> generatedQuestions READ generatedQuestions NOTIFY generatedQuestionsChanged)
     QML_ELEMENT
     QML_UNCREATABLE("Only creatable from c++!")
 
@@ -48,6 +49,7 @@ public:
         LocalDocsRetrieval,
         LocalDocsProcessing,
         PromptProcessing,
+        GeneratingQuestions,
         ResponseGeneration
     };
     Q_ENUM(ResponseState)
@@ -86,7 +88,7 @@ public:
     ResponseState responseState() const;
     ModelInfo modelInfo() const;
     void setModelInfo(const ModelInfo &modelInfo);
-    bool isRecalc() const;
+    bool restoringFromText() const;
 
     Q_INVOKABLE void unloadModel();
     Q_INVOKABLE void reloadModel();
@@ -119,6 +121,8 @@ public:
 
     int trySwitchContextInProgress() const { return m_trySwitchContextInProgress; }
 
+    QList<QString> generatedQuestions() const { return m_generatedQuestions; }
+
 public Q_SLOTS:
     void serverNewPromptResponsePair(const QString &prompt);
 
@@ -140,7 +144,7 @@ Q_SIGNALS:
     void processSystemPromptRequested();
     void modelChangeRequested(const ModelInfo &modelInfo);
     void modelInfoChanged();
-    void recalcChanged();
+    void restoringFromTextChanged();
     void loadDefaultModelRequested();
     void loadModelRequested(const ModelInfo &modelInfo);
     void generateNameRequested();
@@ -153,14 +157,17 @@ Q_SIGNALS:
     void collectionModelChanged();
     void trySwitchContextInProgressChanged();
     void loadedModelInfoChanged();
+    void generatedQuestionsChanged();
 
 private Q_SLOTS:
     void handleResponseChanged(const QString &response);
     void handleModelLoadingPercentageChanged(float);
     void promptProcessing();
+    void generatingQuestions();
     void responseStopped(qint64 promptResponseMs);
     void generatedNameChanged(const QString &name);
-    void handleRecalculating();
+    void generatedQuestionFinished(const QString &question);
+    void handleRestoringFromText();
     void handleModelLoadingError(const QString &error);
     void handleTokenSpeedChanged(const QString &tokenSpeed);
     void handleDatabaseResultsChanged(const QList<ResultInfo> &results);
@@ -179,6 +186,7 @@ private:
     QString m_fallbackReason;
     QString m_response;
     QList<QString> m_collections;
+    QList<QString> m_generatedQuestions;
     ChatModel *m_chatModel;
     bool m_responseInProgress = false;
     ResponseState m_responseState;

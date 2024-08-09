@@ -126,40 +126,6 @@ MySettingsTab {
 
         RowLayout {
             MySettingsLabel {
-                id: deviceLabel
-                text: qsTr("Embeddings Device")
-                helpText: qsTr('The compute device used for embeddings. "Auto" uses the CPU. Requires restart.')
-            }
-            MyComboBox {
-                id: deviceBox
-                enabled: !useNomicAPIBox.checked
-                Layout.minimumWidth: 400
-                Layout.maximumWidth: 400
-                Layout.fillWidth: false
-                Layout.alignment: Qt.AlignRight
-                model: MySettings.embeddingsDeviceList
-                Accessible.name: deviceLabel.text
-                Accessible.description: deviceLabel.helpText
-                function updateModel() {
-                    deviceBox.currentIndex = deviceBox.indexOfValue(MySettings.localDocsEmbedDevice);
-                }
-                Component.onCompleted: {
-                    deviceBox.updateModel();
-                }
-                Connections {
-                    target: MySettings
-                    function onDeviceChanged() {
-                        deviceBox.updateModel();
-                    }
-                }
-                onActivated: {
-                    MySettings.localDocsEmbedDevice = deviceBox.currentText;
-                }
-            }
-        }
-
-        RowLayout {
-            MySettingsLabel {
                 id: apiKeyLabel
                 text: qsTr("Nomic API Key")
                 helpText: qsTr('API key to use for Nomic Embed. Get one from the Atlas <a href="https://atlas.nomic.ai/cli-login">API keys page</a>. Requires restart.')
@@ -190,6 +156,40 @@ MySettingsTab {
                 Accessible.role: Accessible.EditableText
                 Accessible.name: apiKeyLabel.text
                 Accessible.description: apiKeyLabel.helpText
+            }
+        }
+
+        RowLayout {
+            MySettingsLabel {
+                id: deviceLabel
+                text: qsTr("Embeddings Device")
+                helpText: qsTr('The compute device used for embeddings. "Auto" uses the CPU. Requires restart.')
+            }
+            MyComboBox {
+                id: deviceBox
+                enabled: !useNomicAPIBox.checked
+                Layout.minimumWidth: 400
+                Layout.maximumWidth: 400
+                Layout.fillWidth: false
+                Layout.alignment: Qt.AlignRight
+                model: MySettings.embeddingsDeviceList
+                Accessible.name: deviceLabel.text
+                Accessible.description: deviceLabel.helpText
+                function updateModel() {
+                    deviceBox.currentIndex = deviceBox.indexOfValue(MySettings.localDocsEmbedDevice);
+                }
+                Component.onCompleted: {
+                    deviceBox.updateModel();
+                }
+                Connections {
+                    target: MySettings
+                    function onDeviceChanged() {
+                        deviceBox.updateModel();
+                    }
+                }
+                onActivated: {
+                    MySettings.localDocsEmbedDevice = deviceBox.currentText;
+                }
             }
         }
 
@@ -247,7 +247,7 @@ MySettingsTab {
             color: theme.textErrorColor
             wrapMode: Text.WordWrap
             text: qsTr("Warning: Advanced usage only.")
-            helpText: qsTr("Values too large may cause localdocs failure, extremely slow responses or failure to respond at all. Roughly speaking, the {N chars x N snippets} are added to the model's context window. More info <a href=\"https://docs.gpt4all.io/gpt4all_chat.html#localdocs-beta-plugin-chat-with-your-data\">here.</a>")
+            helpText: qsTr("Values too large may cause localdocs failure, extremely slow responses or failure to respond at all. Roughly speaking, the {N chars x N snippets} are added to the model's context window. More info <a href=\"https://docs.gpt4all.io/gpt4all_desktop/localdocs.html\">here</a>.")
             onLinkActivated: function(link) { Qt.openUrlExternally(link) }
         }
 

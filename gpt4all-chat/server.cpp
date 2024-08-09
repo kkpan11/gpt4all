@@ -97,11 +97,12 @@ void Server::start()
             if (!MySettings::globalInstance()->serverChat())
                 return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
 
-            const QList<ModelInfo> modelList = ModelList::globalInstance()->exportModelList();
+            const QList<ModelInfo> modelList = ModelList::globalInstance()->selectableModelList();
             QJsonObject root;
             root.insert("object", "list");
             QJsonArray data;
             for (const ModelInfo &info : modelList) {
+                Q_ASSERT(info.installed);
                 if (!info.installed)
                     continue;
                 data.append(modelToJson(info));
@@ -116,9 +117,10 @@ void Server::start()
             if (!MySettings::globalInstance()->serverChat())
                 return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
 
-            const QList<ModelInfo> modelList = ModelList::globalInstance()->exportModelList();
+            const QList<ModelInfo> modelList = ModelList::globalInstance()->selectableModelList();
             QJsonObject object;
             for (const ModelInfo &info : modelList) {
+                Q_ASSERT(info.installed);
                 if (!info.installed)
                     continue;
 
@@ -144,6 +146,53 @@ void Server::start()
             if (!MySettings::globalInstance()->serverChat())
                 return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
             return handleCompletionRequest(request, true);
+        }
+    );
+
+    // Respond with code 405 to wrong HTTP methods:
+    m_server->route("/v1/models",  QHttpServerRequest::Method::Post,
+        [](const QHttpServerRequest &request) {
+            if (!MySettings::globalInstance()->serverChat())
+                return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
+            return QHttpServerResponse(
+                QJsonDocument::fromJson("{\"error\": {\"message\": \"Not allowed to POST on /v1/models."
+                    " (HINT: Perhaps you meant to use a different HTTP method?)\","
+                    " \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}").object(),
+                QHttpServerResponder::StatusCode::MethodNotAllowed);
+        }
+    );
+
+    m_server->route("/v1/models/<arg>", QHttpServerRequest::Method::Post,
+        [](const QString &model, const QHttpServerRequest &request) {
+            if (!MySettings::globalInstance()->serverChat())
+                return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
+            return QHttpServerResponse(
+                QJsonDocument::fromJson("{\"error\": {\"message\": \"Not allowed to POST on /v1/models/*."
+                    " (HINT: Perhaps you meant to use a different HTTP method?)\","
+                    " \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}").object(),
+                QHttpServerResponder::StatusCode::MethodNotAllowed);
+        }
+    );
+
+    m_server->route("/v1/completions", QHttpServerRequest::Method::Get,
+        [](const QHttpServerRequest &request) {
+            if (!MySettings::globalInstance()->serverChat())
+                return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
+            return QHttpServerResponse(
+                QJsonDocument::fromJson("{\"error\": {\"message\": \"Only POST requests are accepted.\","
+                    " \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"method_not_supported\"}}").object(),
+                QHttpServerResponder::StatusCode::MethodNotAllowed);
+        }
+    );
+
+    m_server->route("/v1/chat/completions", QHttpServerRequest::Method::Get,
+        [](const QHttpServerRequest &request) {
+            if (!MySettings::globalInstance()->serverChat())
+                return QHttpServerResponse(QHttpServerResponder::StatusCode::Unauthorized);
+            return QHttpServerResponse(
+                QJsonDocument::fromJson("{\"error\": {\"message\": \"Only POST requests are accepted.\","
+                    " \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"method_not_supported\"}}").object(),
+                QHttpServerResponder::StatusCode::MethodNotAllowed);
         }
     );
 
@@ -185,8 +234,9 @@ QHttpServerResponse Server::handleCompletionRequest(const QHttpServerRequest &re
 
     const QString modelRequested = body["model"].toString();
     ModelInfo modelInfo = ModelList::globalInstance()->defaultModelInfo();
-    const QList<ModelInfo> modelList = ModelList::globalInstance()->exportModelList();
+    const QList<ModelInfo> modelList = ModelList::globalInstance()->selectableModelList();
     for (const ModelInfo &info : modelList) {
+        Q_ASSERT(info.installed);
         if (!info.installed)
             continue;
         if (modelRequested == info.name() || modelRequested == info.filename()) {

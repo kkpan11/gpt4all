@@ -53,7 +53,7 @@ Rectangle {
 
                 Text {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("the privacy-first LLM chat application")
+                    text: qsTr("The privacy-first LLM chat application")
                     font.pixelSize: theme.fontSizeLarge
                     color: theme.titleInfoTextColor
                 }
@@ -148,10 +148,10 @@ Rectangle {
                             Image {
                                 id: newsImg
                                 anchors.centerIn: parent
-                                sourceSize: Qt.size(40, 40)
+                                sourceSize: Qt.size(48, 48)
                                 mipmap: true
                                 visible: false
-                                source: "qrc:/gpt4all/icons/alt_logo.svg"
+                                source: "qrc:/gpt4all/icons/gpt4all_transparent.svg"
                             }
 
                             ColorOverlay {
@@ -189,6 +189,9 @@ Rectangle {
                                     Accessible.role: Accessible.Paragraph
                                     Accessible.name: qsTr("Latest news")
                                     Accessible.description: qsTr("Latest news from GPT4All")
+                                    onLinkActivated: function(link) {
+                                        Qt.openUrlExternally(link);
+                                    }
                                 }
                             }
                         }
@@ -219,6 +222,12 @@ Rectangle {
                         text: qsTr("Release Notes")
                         imageSource: "qrc:/gpt4all/icons/notes.svg"
                         onClicked: { Qt.openUrlExternally("https://github.com/nomic-ai/gpt4all/releases") }
+                    }
+
+                    MyFancyLink {
+                        text: qsTr("Documentation")
+                        imageSource: "qrc:/gpt4all/icons/info.svg"
+                        onClicked: { Qt.openUrlExternally("https://docs.gpt4all.io/") }
                     }
 
                     MyFancyLink {
@@ -266,7 +275,7 @@ Rectangle {
         color: theme.conversationBackground
         width: subscribeLink.width
         RowLayout {
-            anchors.fill: parent
+            anchors.centerIn: parent
             MyFancyLink {
                 id: subscribeLink
                 Layout.alignment: Qt.AlignCenter

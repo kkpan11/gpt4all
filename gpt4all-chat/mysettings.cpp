@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGlobalStatic>
+#include <QGuiApplication>
 #include <QIODevice>
 #include <QMap>
 #include <QMetaObject>
@@ -23,6 +24,14 @@
 
 using namespace Qt::Literals::StringLiterals;
 
+// used only for settings serialization, do not translate
+static const QStringList suggestionModeNames { "LocalDocsOnly", "On", "Off" };
+static const QStringList chatThemeNames      { "Light", "Dark", "LegacyDark" };
+static const QStringList fontSizeNames       { "Small", "Medium", "Large" };
+
+// FIXME: All of these default strings that are shown in the UI for settings need to be marked as
+// translatable
+
 namespace defaults {
 
 static const int     threadCount             = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -30,18 +39,20 @@ static const bool    forceMetal              = false;
 static const bool    networkIsActive         = false;
 static const bool    networkUsageStatsActive = false;
 static const QString device                  = "Auto";
+static const QString languageAndLocale       = "System Locale";
 
 } // namespace defaults
 
 static const QVariantMap basicDefaults {
-    { "chatTheme",                "Light" },
-    { "fontSize",                 "Small" },
+    { "chatTheme",                QVariant::fromValue(ChatTheme::Light) },
+    { "fontSize",                 QVariant::fromValue(FontSize::Small) },
     { "lastVersionStarted",       "" },
     { "networkPort",              4891, },
     { "saveChatsContext",         false },
     { "serverChat",               false },
     { "userDefaultModel",         "Application default" },
-    { "localdocs/chunkSize",      256 },
+    { "suggestionMode",           QVariant::fromValue(SuggestionMode::LocalDocsOnly) },
+    { "localdocs/chunkSize",      512 },
     { "localdocs/retrievalSize",  3 },
     { "localdocs/showReferences", true },
     { "localdocs/fileExtensions", QStringList { "txt", "pdf", "md", "rst" } },
@@ -80,7 +91,7 @@ static QString defaultLocalModelsPath()
 
 static QStringList getDevices(bool skipKompute = false)
 {
-    QStringList deviceList { "Auto" };
+    QStringList deviceList;
 #if defined(Q_OS_MAC) && defined(__aarch64__)
     deviceList << "Metal";
 #else
@@ -94,6 +105,46 @@ static QStringList getDevices(bool skipKompute = false)
     return deviceList;
 }
 
+static QString getUiLanguage(const QString directory, const QString fileName)
+{
+    QTranslator translator;
+    const QString filePath = directory + QDir::separator() + fileName;
+    if (translator.load(filePath)) {
+        const QString lang = fileName.mid(fileName.indexOf('_') + 1,
+            fileName.lastIndexOf('.') - fileName.indexOf('_') - 1);
+        return lang;
+    }
+
+    qDebug() << "ERROR: Failed to load translation file:" << filePath;
+    return QString();
+}
+
+static QStringList getUiLanguages(const QString &modelPath)
+{
+    QStringList languageList;
+
+    // Add the language translations from model path files first which is used by translation developers
+    // to load translations in progress without having to rebuild all of GPT4All from source
+    {
+        const QDir dir(modelPath);
+        const QStringList qmFiles = dir.entryList({"*.qm"}, QDir::Files);
+        for (const QString &fileName : qmFiles)
+            languageList << getUiLanguage(modelPath, fileName);
+    }
+
+    // Now add the internal language translations
+    {
+        const QDir dir(":/i18n");
+        const QStringList qmFiles = dir.entryList({"*.qm"}, QDir::Files);
+        for (const QString &fileName : qmFiles) {
+            const QString lang = getUiLanguage(":/i18n", fileName);
+            if (!languageList.contains(lang))
+                languageList.append(lang);
+        }
+    }
+    return languageList;
+}
+
 class MyPrivateSettings: public MySettings { };
 Q_GLOBAL_STATIC(MyPrivateSettings, settingsInstance)
 MySettings *MySettings::globalInstance()
@@ -105,6 +156,7 @@ MySettings::MySettings()
     : QObject(nullptr)
     , m_deviceList(getDevices())
     , m_embeddingsDeviceList(getDevices(/*skipKompute*/ true))
+    , m_uiLanguages(getUiLanguages(modelPath()))
 {
 }
 
@@ -122,6 +174,12 @@ void MySettings::setBasicSetting(const QString &name, const QVariant &value, std
     QMetaObject::invokeMethod(this, u"%1Changed"_s.arg(signal.value_or(name)).toLatin1().constData());
 }
 
+int MySettings::getEnumSetting(const QString &setting, const QStringList &valueNames) const
+{
+    int idx = valueNames.indexOf(getBasicSetting(setting).toString());
+    return idx != -1 ? idx : *reinterpret_cast<const int *>(basicDefaults.value(setting).constData());
+}
+
 void MySettings::restoreModelDefaults(const ModelInfo &info)
 {
     setModelTemperature(info, info.m_temperature);
@@ -136,12 +194,14 @@ void MySettings::restoreModelDefaults(const ModelInfo &info)
     setModelRepeatPenaltyTokens(info, info.m_repeatPenaltyTokens);
     setModelPromptTemplate(info, info.m_promptTemplate);
     setModelSystemPrompt(info, info.m_systemPrompt);
+    setModelChatNamePrompt(info, info.m_chatNamePrompt);
+    setModelSuggestedFollowUpPrompt(info, info.m_suggestedFollowUpPrompt);
 }
 
 void MySettings::restoreApplicationDefaults()
 {
-    setChatTheme(basicDefaults.value("chatTheme").toString());
-    setFontSize(basicDefaults.value("fontSize").toString());
+    setChatTheme(basicDefaults.value("chatTheme").value<ChatTheme>());
+    setFontSize(basicDefaults.value("fontSize").value<FontSize>());
     setDevice(defaults::device);
     setThreadCount(defaults::threadCount);
     setSaveChatsContext(basicDefaults.value("saveChatsContext").toBool());
@@ -150,6 +210,8 @@ void MySettings::restoreApplicationDefaults()
     setModelPath(defaultLocalModelsPath());
     setUserDefaultModel(basicDefaults.value("userDefaultModel").toString());
     setForceMetal(defaults::forceMetal);
+    setSuggestionMode(basicDefaults.value("suggestionMode").value<SuggestionMode>());
+    setLanguageAndLocale(defaults::languageAndLocale);
 }
 
 void MySettings::restoreLocalDocsDefaults()
@@ -212,28 +274,30 @@ void MySettings::setModelSetting(const QString &name, const ModelInfo &info, con
         QMetaObject::invokeMethod(this, u"%1Changed"_s.arg(name).toLatin1().constData(), Q_ARG(ModelInfo, info));
 }
 
-QString   MySettings::modelFilename           (const ModelInfo &info) const { return getModelSetting("filename",            info).toString(); }
-QString   MySettings::modelDescription        (const ModelInfo &info) const { return getModelSetting("description",         info).toString(); }
-QString   MySettings::modelUrl                (const ModelInfo &info) const { return getModelSetting("url",                 info).toString(); }
-QString   MySettings::modelQuant              (const ModelInfo &info) const { return getModelSetting("quant",               info).toString(); }
-QString   MySettings::modelType               (const ModelInfo &info) const { return getModelSetting("type",                info).toString(); }
-bool      MySettings::modelIsClone            (const ModelInfo &info) const { return getModelSetting("isClone",             info).toBool(); }
-bool      MySettings::modelIsDiscovered       (const ModelInfo &info) const { return getModelSetting("isDiscovered",        info).toBool(); }
-int       MySettings::modelLikes              (const ModelInfo &info) const { return getModelSetting("likes",               info).toInt(); }
-int       MySettings::modelDownloads          (const ModelInfo &info) const { return getModelSetting("downloads",           info).toInt(); }
-QDateTime MySettings::modelRecency            (const ModelInfo &info) const { return getModelSetting("recency",             info).toDateTime(); }
-double    MySettings::modelTemperature        (const ModelInfo &info) const { return getModelSetting("temperature",         info).toDouble(); }
-double    MySettings::modelTopP               (const ModelInfo &info) const { return getModelSetting("topP",                info).toDouble(); }
-double    MySettings::modelMinP               (const ModelInfo &info) const { return getModelSetting("minP",                info).toDouble(); }
-int       MySettings::modelTopK               (const ModelInfo &info) const { return getModelSetting("topK",                info).toInt(); }
-int       MySettings::modelMaxLength          (const ModelInfo &info) const { return getModelSetting("maxLength",           info).toInt(); }
-int       MySettings::modelPromptBatchSize    (const ModelInfo &info) const { return getModelSetting("promptBatchSize",     info).toInt(); }
-int       MySettings::modelContextLength      (const ModelInfo &info) const { return getModelSetting("contextLength",       info).toInt(); }
-int       MySettings::modelGpuLayers          (const ModelInfo &info) const { return getModelSetting("gpuLayers",           info).toInt(); }
-double    MySettings::modelRepeatPenalty      (const ModelInfo &info) const { return getModelSetting("repeatPenalty",       info).toDouble(); }
-int       MySettings::modelRepeatPenaltyTokens(const ModelInfo &info) const { return getModelSetting("repeatPenaltyTokens", info).toInt(); }
-QString   MySettings::modelPromptTemplate     (const ModelInfo &info) const { return getModelSetting("promptTemplate",      info).toString(); }
-QString   MySettings::modelSystemPrompt       (const ModelInfo &info) const { return getModelSetting("systemPrompt",        info).toString(); }
+QString   MySettings::modelFilename               (const ModelInfo &info) const { return getModelSetting("filename",                info).toString(); }
+QString   MySettings::modelDescription            (const ModelInfo &info) const { return getModelSetting("description",             info).toString(); }
+QString   MySettings::modelUrl                    (const ModelInfo &info) const { return getModelSetting("url",                     info).toString(); }
+QString   MySettings::modelQuant                  (const ModelInfo &info) const { return getModelSetting("quant",                   info).toString(); }
+QString   MySettings::modelType                   (const ModelInfo &info) const { return getModelSetting("type",                    info).toString(); }
+bool      MySettings::modelIsClone                (const ModelInfo &info) const { return getModelSetting("isClone",                 info).toBool(); }
+bool      MySettings::modelIsDiscovered           (const ModelInfo &info) const { return getModelSetting("isDiscovered",            info).toBool(); }
+int       MySettings::modelLikes                  (const ModelInfo &info) const { return getModelSetting("likes",                   info).toInt(); }
+int       MySettings::modelDownloads              (const ModelInfo &info) const { return getModelSetting("downloads",               info).toInt(); }
+QDateTime MySettings::modelRecency                (const ModelInfo &info) const { return getModelSetting("recency",                 info).toDateTime(); }
+double    MySettings::modelTemperature            (const ModelInfo &info) const { return getModelSetting("temperature",             info).toDouble(); }
+double    MySettings::modelTopP                   (const ModelInfo &info) const { return getModelSetting("topP",                    info).toDouble(); }
+double    MySettings::modelMinP                   (const ModelInfo &info) const { return getModelSetting("minP",                    info).toDouble(); }
+int       MySettings::modelTopK                   (const ModelInfo &info) const { return getModelSetting("topK",                    info).toInt(); }
+int       MySettings::modelMaxLength              (const ModelInfo &info) const { return getModelSetting("maxLength",               info).toInt(); }
+int       MySettings::modelPromptBatchSize        (const ModelInfo &info) const { return getModelSetting("promptBatchSize",         info).toInt(); }
+int       MySettings::modelContextLength          (const ModelInfo &info) const { return getModelSetting("contextLength",           info).toInt(); }
+int       MySettings::modelGpuLayers              (const ModelInfo &info) const { return getModelSetting("gpuLayers",               info).toInt(); }
+double    MySettings::modelRepeatPenalty          (const ModelInfo &info) const { return getModelSetting("repeatPenalty",           info).toDouble(); }
+int       MySettings::modelRepeatPenaltyTokens    (const ModelInfo &info) const { return getModelSetting("repeatPenaltyTokens",     info).toInt(); }
+QString   MySettings::modelPromptTemplate         (const ModelInfo &info) const { return getModelSetting("promptTemplate",          info).toString(); }
+QString   MySettings::modelSystemPrompt           (const ModelInfo &info) const { return getModelSetting("systemPrompt",            info).toString(); }
+QString   MySettings::modelChatNamePrompt         (const ModelInfo &info) const { return getModelSetting("chatNamePrompt",          info).toString(); }
+QString   MySettings::modelSuggestedFollowUpPrompt(const ModelInfo &info) const { return getModelSetting("suggestedFollowUpPrompt", info).toString(); }
 
 void MySettings::setModelFilename(const ModelInfo &info, const QString &value, bool force)
 {
@@ -345,6 +409,16 @@ void MySettings::setModelSystemPrompt(const ModelInfo &info, const QString &valu
     setModelSetting("systemPrompt", info, value, force, true);
 }
 
+void MySettings::setModelChatNamePrompt(const ModelInfo &info, const QString &value, bool force)
+{
+    setModelSetting("chatNamePrompt", info, value, force, true);
+}
+
+void MySettings::setModelSuggestedFollowUpPrompt(const ModelInfo &info, const QString &value, bool force)
+{
+    setModelSetting("suggestedFollowUpPrompt", info, value, force, true);
+}
+
 int MySettings::threadCount() const
 {
     int c = m_settings.value("threadCount", defaults::threadCount).toInt();
@@ -372,8 +446,6 @@ bool        MySettings::saveChatsContext() const        { return getBasicSetting
 bool        MySettings::serverChat() const              { return getBasicSetting("serverChat"              ).toBool(); }
 int         MySettings::networkPort() const             { return getBasicSetting("networkPort"             ).toInt(); }
 QString     MySettings::userDefaultModel() const        { return getBasicSetting("userDefaultModel"        ).toString(); }
-QString     MySettings::chatTheme() const               { return getBasicSetting("chatTheme"               ).toString(); }
-QString     MySettings::fontSize() const                { return getBasicSetting("fontSize"                ).toString(); }
 QString     MySettings::lastVersionStarted() const      { return getBasicSetting("lastVersionStarted"      ).toString(); }
 int         MySettings::localDocsChunkSize() const      { return getBasicSetting("localdocs/chunkSize"     ).toInt(); }
 int         MySettings::localDocsRetrievalSize() const  { return getBasicSetting("localdocs/retrievalSize" ).toInt(); }
@@ -384,12 +456,14 @@ QString     MySettings::localDocsNomicAPIKey() const    { return getBasicSetting
 QString     MySettings::localDocsEmbedDevice() const    { return getBasicSetting("localdocs/embedDevice"   ).toString(); }
 QString     MySettings::networkAttribution() const      { return getBasicSetting("network/attribution"     ).toString(); }
 
+ChatTheme      MySettings::chatTheme() const      { return ChatTheme     (getEnumSetting("chatTheme", chatThemeNames)); }
+FontSize       MySettings::fontSize() const       { return FontSize      (getEnumSetting("fontSize",  fontSizeNames)); }
+SuggestionMode MySettings::suggestionMode() const { return SuggestionMode(getEnumSetting("suggestionMode", suggestionModeNames)); }
+
 void MySettings::setSaveChatsContext(bool value)                      { setBasicSetting("saveChatsContext",         value); }
 void MySettings::setServerChat(bool value)                            { setBasicSetting("serverChat",               value); }
 void MySettings::setNetworkPort(int value)                            { setBasicSetting("networkPort",              value); }
 void MySettings::setUserDefaultModel(const QString &value)            { setBasicSetting("userDefaultModel",         value); }
-void MySettings::setChatTheme(const QString &value)                   { setBasicSetting("chatTheme",                value); }
-void MySettings::setFontSize(const QString &value)                    { setBasicSetting("fontSize",                 value); }
 void MySettings::setLastVersionStarted(const QString &value)          { setBasicSetting("lastVersionStarted",       value); }
 void MySettings::setLocalDocsChunkSize(int value)                     { setBasicSetting("localdocs/chunkSize",      value, "localDocsChunkSize"); }
 void MySettings::setLocalDocsRetrievalSize(int value)                 { setBasicSetting("localdocs/retrievalSize",  value, "localDocsRetrievalSize"); }
@@ -399,6 +473,10 @@ void MySettings::setLocalDocsUseRemoteEmbed(bool value)               { setBasic
 void MySettings::setLocalDocsNomicAPIKey(const QString &value)        { setBasicSetting("localdocs/nomicAPIKey",    value, "localDocsNomicAPIKey"); }
 void MySettings::setLocalDocsEmbedDevice(const QString &value)        { setBasicSetting("localdocs/embedDevice",    value, "localDocsEmbedDevice"); }
 void MySettings::setNetworkAttribution(const QString &value)          { setBasicSetting("network/attribution",      value, "networkAttribution"); }
+
+void MySettings::setChatTheme(ChatTheme value)           { setBasicSetting("chatTheme",      chatThemeNames     .value(int(value))); }
+void MySettings::setFontSize(FontSize value)             { setBasicSetting("fontSize",       fontSizeNames      .value(int(value))); }
+void MySettings::setSuggestionMode(SuggestionMode value) { setBasicSetting("suggestionMode", suggestionModeNames.value(int(value))); }
 
 QString MySettings::modelPath()
 {
@@ -502,4 +580,91 @@ void MySettings::setNetworkUsageStatsActive(bool value)
         m_settings.setValue("network/usageStatsActive", value);
         emit networkUsageStatsActiveChanged();
     }
+}
+
+QString MySettings::languageAndLocale() const
+{
+    auto value = m_settings.value("languageAndLocale");
+    if (!value.isValid())
+        return defaults::languageAndLocale;
+    return value.toString();
+}
+
+QString MySettings::filePathForLocale(const QLocale &locale)
+{
+    // Check and see if we have a translation for the chosen locale and set it if possible otherwise
+    // we return the filepath for the 'en_US' translation
+    QStringList uiLanguages = locale.uiLanguages();
+    for (int i = 0; i < uiLanguages.size(); ++i)
+        uiLanguages[i].replace('-', '_');
+
+    // Scan this directory for files named like gpt4all_%1.qm that match and if so return them first
+    // this is the model download directory and it can be used by translation developers who are
+    // trying to test their translations by just compiling the translation with the lrelease tool
+    // rather than having to recompile all of GPT4All
+    QString directory = modelPath();
+    for (const QString &bcp47Name : uiLanguages) {
+        QString filePath = u"%1/gpt4all_%2.qm"_s.arg(directory, bcp47Name);
+        QFileInfo filePathInfo(filePath);
+        if (filePathInfo.exists()) return filePath;
+    }
+
+    // Now scan the internal built-in translations
+    for (QString bcp47Name : uiLanguages) {
+        QString filePath = u":/i18n/gpt4all_%1.qm"_s.arg(bcp47Name);
+        QFileInfo filePathInfo(filePath);
+        if (filePathInfo.exists()) return filePath;
+    }
+    return u":/i18n/gpt4all_en_US.qm"_s;
+}
+
+void MySettings::setLanguageAndLocale(const QString &bcp47Name)
+{
+    if (!bcp47Name.isEmpty() && languageAndLocale() != bcp47Name)
+        m_settings.setValue("languageAndLocale", bcp47Name);
+
+    // When the app is started this method is called with no bcp47Name given which sets the translation
+    // to either the default which is the system locale or the one explicitly set by the user previously.
+    QLocale locale;
+    const QString l = languageAndLocale();
+    if (l == "System Locale")
+        locale = QLocale::system();
+    else
+        locale = QLocale(l);
+
+#ifdef GPT4ALL_USE_TRANSLATIONS
+    // If we previously installed a translator, then remove it
+    if (m_translator) {
+        if (!qGuiApp->removeTranslator(m_translator.get())) {
+            qDebug() << "ERROR: Failed to remove the previous translator";
+        } else {
+            m_translator.reset();
+        }
+    }
+
+    // We expect that the translator was removed and is now a nullptr
+    Q_ASSERT(!m_translator);
+
+    const QString filePath = filePathForLocale(locale);
+    if (!m_translator) {
+        // Create a new translator object on the heap
+        m_translator = std::make_unique<QTranslator>(this);
+        bool success = m_translator->load(filePath);
+        Q_ASSERT(success);
+        if (!success) {
+            qDebug() << "ERROR: Failed to load translation file:" << filePath;
+            m_translator.reset();
+        }
+
+        // If we've successfully loaded it, then try and install it
+        if (!qGuiApp->installTranslator(m_translator.get())) {
+            qDebug() << "ERROR: Failed to install the translator:" << filePath;
+            m_translator.reset();
+        }
+    }
+#endif
+
+    // Finally, set the locale whether we have a translation or not
+    QLocale::setDefault(locale);
+    emit languageAndLocaleChanged();
 }

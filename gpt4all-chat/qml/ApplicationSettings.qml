@@ -107,11 +107,16 @@ MySettingsTab {
             Layout.maximumWidth: 200
             Layout.fillWidth: false
             Layout.alignment: Qt.AlignRight
-            model: [qsTr("Dark"), qsTr("Light"), qsTr("LegacyDark")]
+            // NOTE: indices match values of ChatTheme enum, keep them in sync
+            model: ListModel {
+                ListElement { name: qsTr("Light") }
+                ListElement { name: qsTr("Dark") }
+                ListElement { name: qsTr("LegacyDark") }
+            }
             Accessible.name: themeLabel.text
             Accessible.description: themeLabel.helpText
             function updateModel() {
-                themeBox.currentIndex = themeBox.indexOfValue(MySettings.chatTheme);
+                themeBox.currentIndex = MySettings.chatTheme;
             }
             Component.onCompleted: {
                 themeBox.updateModel()
@@ -123,7 +128,7 @@ MySettingsTab {
                 }
             }
             onActivated: {
-                MySettings.chatTheme = themeBox.currentText
+                MySettings.chatTheme = themeBox.currentIndex
             }
         }
         MySettingsLabel {
@@ -141,11 +146,16 @@ MySettingsTab {
             Layout.maximumWidth: 200
             Layout.fillWidth: false
             Layout.alignment: Qt.AlignRight
-            model: ["Small", "Medium", "Large"]
+            // NOTE: indices match values of FontSize enum, keep them in sync
+            model: ListModel {
+                ListElement { name: qsTr("Small") }
+                ListElement { name: qsTr("Medium") }
+                ListElement { name: qsTr("Large") }
+            }
             Accessible.name: fontLabel.text
             Accessible.description: fontLabel.helpText
             function updateModel() {
-                fontBox.currentIndex = fontBox.indexOfValue(MySettings.fontSize);
+                fontBox.currentIndex = MySettings.fontSize;
             }
             Component.onCompleted: {
                 fontBox.updateModel()
@@ -157,29 +167,90 @@ MySettingsTab {
                 }
             }
             onActivated: {
-                MySettings.fontSize = fontBox.currentText
+                MySettings.fontSize = fontBox.currentIndex
+            }
+        }
+        MySettingsLabel {
+            id: languageLabel
+            visible: MySettings.uiLanguages.length > 1
+            text: qsTr("Language and Locale")
+            helpText: qsTr("The language and locale you wish to use.")
+            Layout.row: 4
+            Layout.column: 0
+        }
+        MyComboBox {
+            id: languageBox
+            visible: MySettings.uiLanguages.length > 1
+            Layout.row: 4
+            Layout.column: 2
+            Layout.minimumWidth: 200
+            Layout.maximumWidth: 200
+            Layout.fillWidth: false
+            Layout.alignment: Qt.AlignRight
+            model: ListModel {
+                Component.onCompleted: {
+                    for (var i = 0; i < MySettings.uiLanguages.length; ++i)
+                        append({"text": MySettings.uiLanguages[i]});
+                    languageBox.updateModel();
+                }
+                ListElement { text: qsTr("System Locale") }
+            }
+
+            Accessible.name: languageLabel.text
+            Accessible.description: languageLabel.helpText
+            function updateModel() {
+                // This usage of 'System Locale' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (MySettings.languageAndLocale === "System Locale")
+                    languageBox.currentIndex = 0
+                else
+                    languageBox.currentIndex = languageBox.indexOfValue(MySettings.languageAndLocale);
+            }
+            Component.onCompleted: {
+                languageBox.updateModel()
+            }
+            onActivated: {
+                // This usage of 'System Locale' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (languageBox.currentIndex === 0)
+                    MySettings.languageAndLocale = "System Locale";
+                else
+                    MySettings.languageAndLocale = languageBox.currentText;
             }
         }
         MySettingsLabel {
             id: deviceLabel
             text: qsTr("Device")
-            helpText: qsTr('The compute device used for text generation. "Auto" uses Vulkan or Metal.')
-            Layout.row: 4
+            helpText: qsTr('The compute device used for text generation.')
+            Layout.row: 5
             Layout.column: 0
         }
         MyComboBox {
             id: deviceBox
-            Layout.row: 4
+            Layout.row: 5
             Layout.column: 2
             Layout.minimumWidth: 400
             Layout.maximumWidth: 400
             Layout.fillWidth: false
             Layout.alignment: Qt.AlignRight
-            model: MySettings.deviceList
+            model: ListModel {
+                Component.onCompleted: {
+                    for (var i = 0; i < MySettings.deviceList.length; ++i)
+                        append({"text": MySettings.deviceList[i]});
+                    deviceBox.updateModel();
+                }
+                ListElement { text: qsTr("Application default") }
+            }
+
             Accessible.name: deviceLabel.text
             Accessible.description: deviceLabel.helpText
             function updateModel() {
-                deviceBox.currentIndex = deviceBox.indexOfValue(MySettings.device);
+                // This usage of 'Auto' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (MySettings.device === "Auto")
+                    deviceBox.currentIndex = 0
+                else
+                    deviceBox.currentIndex = deviceBox.indexOfValue(MySettings.device);
             }
             Component.onCompleted: {
                 deviceBox.updateModel();
@@ -191,52 +262,117 @@ MySettingsTab {
                 }
             }
             onActivated: {
-                MySettings.device = deviceBox.currentText;
+                // This usage of 'Auto' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (deviceBox.currentIndex === 0)
+                    MySettings.device = "Auto";
+                else
+                    MySettings.device = deviceBox.currentText;
             }
         }
         MySettingsLabel {
             id: defaultModelLabel
             text: qsTr("Default Model")
             helpText: qsTr("The preferred model for new chats. Also used as the local server fallback.")
-            Layout.row: 5
+            Layout.row: 6
             Layout.column: 0
         }
         MyComboBox {
-            id: comboBox
-            Layout.row: 5
+            id: defaultModelBox
+            Layout.row: 6
             Layout.column: 2
             Layout.minimumWidth: 400
             Layout.maximumWidth: 400
             Layout.alignment: Qt.AlignRight
-            model: ModelList.userDefaultModelList
+            model: ListModel {
+                id: defaultModelBoxModel
+                Component.onCompleted: {
+                    defaultModelBox.rebuildModel()
+                }
+            }
             Accessible.name: defaultModelLabel.text
             Accessible.description: defaultModelLabel.helpText
-            function updateModel() {
-                comboBox.currentIndex = comboBox.indexOfValue(MySettings.userDefaultModel);
+            function rebuildModel() {
+                defaultModelBoxModel.clear();
+                defaultModelBoxModel.append({"text": qsTr("Application default")});
+                for (var i = 0; i < ModelList.selectableModelList.length; ++i)
+                    defaultModelBoxModel.append({"text": ModelList.selectableModelList[i].name});
+                defaultModelBox.updateModel();
             }
-            Component.onCompleted: {
-                comboBox.updateModel()
+            function updateModel() {
+                // This usage of 'Application default' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (MySettings.userDefaultModel === "Application default")
+                    defaultModelBox.currentIndex = 0
+                else
+                    defaultModelBox.currentIndex = defaultModelBox.indexOfValue(MySettings.userDefaultModel);
+            }
+            onActivated: {
+                // This usage of 'Application default' should not be translated
+                // FIXME: Make this refer to a string literal variable accessed by both QML and C++
+                if (defaultModelBox.currentIndex === 0)
+                    MySettings.userDefaultModel = "Application default";
+                else
+                    MySettings.userDefaultModel = defaultModelBox.currentText;
             }
             Connections {
                 target: MySettings
                 function onUserDefaultModelChanged() {
-                    comboBox.updateModel()
+                    defaultModelBox.updateModel()
                 }
             }
+            Connections {
+                target: MySettings
+                function onLanguageAndLocaleChanged() {
+                    defaultModelBox.rebuildModel()
+                }
+            }
+            Connections {
+                target: ModelList
+                function onSelectableModelListChanged() {
+                    defaultModelBox.rebuildModel()
+                }
+            }
+        }
+        MySettingsLabel {
+            id: suggestionModeLabel
+            text: qsTr("Suggestion Mode")
+            helpText: qsTr("Generate suggested follow-up questions at the end of responses.")
+            Layout.row: 7
+            Layout.column: 0
+        }
+        MyComboBox {
+            id: suggestionModeBox
+            Layout.row: 7
+            Layout.column: 2
+            Layout.minimumWidth: 400
+            Layout.maximumWidth: 400
+            Layout.alignment: Qt.AlignRight
+            // NOTE: indices match values of SuggestionMode enum, keep them in sync
+            model: ListModel {
+                ListElement { name: qsTr("When chatting with LocalDocs") }
+                ListElement { name: qsTr("Whenever possible") }
+                ListElement { name: qsTr("Never") }
+            }
+            Accessible.name: suggestionModeLabel.text
+            Accessible.description: suggestionModeLabel.helpText
             onActivated: {
-                MySettings.userDefaultModel = comboBox.currentText
+                MySettings.suggestionMode = suggestionModeBox.currentIndex;
+            }
+            Component.onCompleted: {
+                suggestionModeBox.currentIndex = MySettings.suggestionMode;
             }
         }
         MySettingsLabel {
             id: modelPathLabel
             text: qsTr("Download Path")
             helpText: qsTr("Where to store local models and the LocalDocs database.")
-            Layout.row: 6
+            Layout.row: 8
             Layout.column: 0
         }
 
         RowLayout {
-            Layout.row: 6
+            Layout.row: 8
             Layout.column: 2
             Layout.alignment: Qt.AlignRight
             Layout.minimumWidth: 400
@@ -273,12 +409,12 @@ MySettingsTab {
             id: dataLakeLabel
             text: qsTr("Enable Datalake")
             helpText: qsTr("Send chats and feedback to the GPT4All Open-Source Datalake.")
-            Layout.row: 7
+            Layout.row: 9
             Layout.column: 0
         }
         MyCheckBox {
             id: dataLakeBox
-            Layout.row: 7
+            Layout.row: 9
             Layout.column: 2
             Layout.alignment: Qt.AlignRight
             Component.onCompleted: { dataLakeBox.checked = MySettings.networkIsActive; }
@@ -296,7 +432,7 @@ MySettingsTab {
         }
 
         ColumnLayout {
-            Layout.row: 8
+            Layout.row: 10
             Layout.column: 0
             Layout.columnSpan: 3
             Layout.fillWidth: true
@@ -319,7 +455,7 @@ MySettingsTab {
             id: nThreadsLabel
             text: qsTr("CPU Threads")
             helpText: qsTr("The number of CPU threads used for inference and embedding.")
-            Layout.row: 9
+            Layout.row: 11
             Layout.column: 0
         }
         MyTextField {
@@ -327,7 +463,7 @@ MySettingsTab {
             color: theme.textColor
             font.pixelSize: theme.fontSizeLarge
             Layout.alignment: Qt.AlignRight
-            Layout.row: 9
+            Layout.row: 11
             Layout.column: 2
             Layout.minimumWidth: 200
             Layout.maximumWidth: 200
@@ -351,12 +487,12 @@ MySettingsTab {
             id: saveChatsContextLabel
             text: qsTr("Save Chat Context")
             helpText: qsTr("Save the chat model's state to disk for faster loading. WARNING: Uses ~2GB per chat.")
-            Layout.row: 10
+            Layout.row: 12
             Layout.column: 0
         }
         MyCheckBox {
             id: saveChatsContextBox
-            Layout.row: 10
+            Layout.row: 12
             Layout.column: 2
             Layout.alignment: Qt.AlignRight
             checked: MySettings.saveChatsContext
@@ -368,12 +504,12 @@ MySettingsTab {
             id: serverChatLabel
             text: qsTr("Enable Local Server")
             helpText: qsTr("Expose an OpenAI-Compatible server to localhost. WARNING: Results in increased resource usage.")
-            Layout.row: 11
+            Layout.row: 13
             Layout.column: 0
         }
         MyCheckBox {
             id: serverChatBox
-            Layout.row: 11
+            Layout.row: 13
             Layout.column: 2
             Layout.alignment: Qt.AlignRight
             checked: MySettings.serverChat
@@ -385,7 +521,7 @@ MySettingsTab {
             id: serverPortLabel
             text: qsTr("API Server Port")
             helpText: qsTr("The port to use for the local server. Requires restart.")
-            Layout.row: 12
+            Layout.row: 14
             Layout.column: 0
         }
         MyTextField {
@@ -393,7 +529,7 @@ MySettingsTab {
             text: MySettings.networkPort
             color: theme.textColor
             font.pixelSize: theme.fontSizeLarge
-            Layout.row: 12
+            Layout.row: 14
             Layout.column: 2
             Layout.minimumWidth: 200
             Layout.maximumWidth: 200
@@ -438,12 +574,12 @@ MySettingsTab {
             id: updatesLabel
             text: qsTr("Check For Updates")
             helpText: qsTr("Manually check for an update to GPT4All.");
-            Layout.row: 14
+            Layout.row: 15
             Layout.column: 0
         }
 
         MySettingsButton {
-            Layout.row: 14
+            Layout.row: 15
             Layout.column: 2
             Layout.alignment: Qt.AlignRight
             text: qsTr("Updates");
@@ -454,7 +590,7 @@ MySettingsTab {
         }
 
         Rectangle {
-            Layout.row: 15
+            Layout.row: 16
             Layout.column: 0
             Layout.columnSpan: 3
             Layout.fillWidth: true

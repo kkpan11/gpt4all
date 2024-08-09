@@ -11,7 +11,37 @@
 #include <QVector>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
+
+namespace MySettingsEnums {
+    Q_NAMESPACE
+
+    /* NOTE: values of these enums are used as indices for the corresponding combo boxes in
+     *       ApplicationSettings.qml, as well as the corresponding name lists in mysettings.cpp */
+
+    enum class SuggestionMode {
+        LocalDocsOnly = 0,
+        On            = 1,
+        Off           = 2,
+    };
+    Q_ENUM_NS(SuggestionMode)
+
+    enum class ChatTheme {
+        Light      = 0,
+        Dark       = 1,
+        LegacyDark = 2,
+    };
+    Q_ENUM_NS(ChatTheme)
+
+    enum class FontSize {
+        Small  = 0,
+        Medium = 1,
+        Large  = 2,
+    };
+    Q_ENUM_NS(FontSize)
+}
+using namespace MySettingsEnums;
 
 class MySettings : public QObject
 {
@@ -21,8 +51,9 @@ class MySettings : public QObject
     Q_PROPERTY(bool serverChat READ serverChat WRITE setServerChat NOTIFY serverChatChanged)
     Q_PROPERTY(QString modelPath READ modelPath WRITE setModelPath NOTIFY modelPathChanged)
     Q_PROPERTY(QString userDefaultModel READ userDefaultModel WRITE setUserDefaultModel NOTIFY userDefaultModelChanged)
-    Q_PROPERTY(QString chatTheme READ chatTheme WRITE setChatTheme NOTIFY chatThemeChanged)
-    Q_PROPERTY(QString fontSize READ fontSize WRITE setFontSize NOTIFY fontSizeChanged)
+    Q_PROPERTY(ChatTheme chatTheme READ chatTheme WRITE setChatTheme NOTIFY chatThemeChanged)
+    Q_PROPERTY(FontSize fontSize READ fontSize WRITE setFontSize NOTIFY fontSizeChanged)
+    Q_PROPERTY(QString languageAndLocale READ languageAndLocale WRITE setLanguageAndLocale NOTIFY languageAndLocaleChanged)
     Q_PROPERTY(bool forceMetal READ forceMetal WRITE setForceMetal NOTIFY forceMetalChanged)
     Q_PROPERTY(QString lastVersionStarted READ lastVersionStarted WRITE setLastVersionStarted NOTIFY lastVersionStartedChanged)
     Q_PROPERTY(int localDocsChunkSize READ localDocsChunkSize WRITE setLocalDocsChunkSize NOTIFY localDocsChunkSizeChanged)
@@ -39,6 +70,8 @@ class MySettings : public QObject
     Q_PROPERTY(QStringList deviceList MEMBER m_deviceList CONSTANT)
     Q_PROPERTY(QStringList embeddingsDeviceList MEMBER m_embeddingsDeviceList CONSTANT)
     Q_PROPERTY(int networkPort READ networkPort WRITE setNetworkPort NOTIFY networkPortChanged)
+    Q_PROPERTY(SuggestionMode suggestionMode READ suggestionMode WRITE setSuggestionMode NOTIFY suggestionModeChanged)
+    Q_PROPERTY(QStringList uiLanguages MEMBER m_uiLanguages CONSTANT)
 
 public:
     static MySettings *globalInstance();
@@ -98,6 +131,10 @@ public:
     Q_INVOKABLE void setModelContextLength(const ModelInfo &info, int value, bool force = false);
     int modelGpuLayers(const ModelInfo &info) const;
     Q_INVOKABLE void setModelGpuLayers(const ModelInfo &info, int value, bool force = false);
+    QString modelChatNamePrompt(const ModelInfo &info) const;
+    Q_INVOKABLE void setModelChatNamePrompt(const ModelInfo &info, const QString &value, bool force = false);
+    QString modelSuggestedFollowUpPrompt(const ModelInfo &info) const;
+    Q_INVOKABLE void setModelSuggestedFollowUpPrompt(const ModelInfo &info, const QString &value, bool force = false);
 
     // Application settings
     int threadCount() const;
@@ -110,10 +147,10 @@ public:
     void setModelPath(const QString &value);
     QString userDefaultModel() const;
     void setUserDefaultModel(const QString &value);
-    QString chatTheme() const;
-    void setChatTheme(const QString &value);
-    QString fontSize() const;
-    void setFontSize(const QString &value);
+    ChatTheme chatTheme() const;
+    void setChatTheme(ChatTheme value);
+    FontSize fontSize() const;
+    void setFontSize(FontSize value);
     bool forceMetal() const;
     void setForceMetal(bool value);
     QString device();
@@ -122,6 +159,11 @@ public:
     void setContextLength(int32_t value);
     int32_t gpuLayers() const;
     void setGpuLayers(int32_t value);
+    SuggestionMode suggestionMode() const;
+    void setSuggestionMode(SuggestionMode value);
+
+    QString languageAndLocale() const;
+    void setLanguageAndLocale(const QString &bcp47Name = QString()); // called on startup with QString()
 
     // Release/Download settings
     QString lastVersionStarted() const;
@@ -171,6 +213,8 @@ Q_SIGNALS:
     void repeatPenaltyTokensChanged(const ModelInfo &info);
     void promptTemplateChanged(const ModelInfo &info);
     void systemPromptChanged(const ModelInfo &info);
+    void chatNamePromptChanged(const ModelInfo &info);
+    void suggestedFollowUpPromptChanged(const ModelInfo &info);
     void threadCountChanged();
     void saveChatsContextChanged();
     void serverChatChanged();
@@ -193,12 +237,16 @@ Q_SIGNALS:
     void networkUsageStatsActiveChanged();
     void attemptModelLoadChanged();
     void deviceChanged();
+    void suggestionModeChanged();
+    void languageAndLocaleChanged();
 
 private:
     QSettings m_settings;
     bool m_forceMetal;
     const QStringList m_deviceList;
     const QStringList m_embeddingsDeviceList;
+    const QStringList m_uiLanguages;
+    std::unique_ptr<QTranslator> m_translator;
 
 private:
     explicit MySettings();
@@ -207,9 +255,11 @@ private:
 
     QVariant getBasicSetting(const QString &name) const;
     void setBasicSetting(const QString &name, const QVariant &value, std::optional<QString> signal = std::nullopt);
+    int getEnumSetting(const QString &setting, const QStringList &valueNames) const;
     QVariant getModelSetting(const QString &name, const ModelInfo &info) const;
     void setModelSetting(const QString &name, const ModelInfo &info, const QVariant &value, bool force,
                          bool signal = false);
+    QString filePathForLocale(const QLocale &locale);
 };
 
 #endif // MYSETTINGS_H

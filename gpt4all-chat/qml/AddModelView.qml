@@ -25,6 +25,10 @@ Rectangle {
     color: theme.viewBackground
     signal modelsViewRequested()
 
+    ToastManager {
+        id: messageToast
+    }
+
     PopupDialog {
         id: downloadingErrorPopup
         anchors.centerIn: parent
@@ -94,7 +98,7 @@ Rectangle {
                         function onDiscoverInProgressChanged() {
                             if (ModelList.discoverInProgress) {
                                 discoverField.textBeingSearched = discoverField.text;
-                                discoverField.text = qsTr("Searching \u00B7 ") + discoverField.textBeingSearched;
+                                discoverField.text = qsTr("Searching \u00B7 %1").arg(discoverField.textBeingSearched);
                             } else {
                                 discoverField.text = discoverField.textBeingSearched;
                                 discoverField.textBeingSearched = "";
@@ -144,11 +148,7 @@ Rectangle {
                             backgroundColor: theme.textColor
                             backgroundColorHovered: theme.iconBackgroundDark
                             visible: discoverField.text !== ""
-                            contentItem: Text {
-                                color: clearDiscoverButton.hovered ? theme.iconBackgroundDark : theme.textColor
-                                text: "\u2715"
-                                font.pixelSize: theme.fontSizeLarge
-                            }
+                            source: "qrc:/gpt4all/icons/close.svg"
                             onClicked: {
                                 discoverField.text = ""
                                 discoverField.sendDiscovery() // should clear results
@@ -187,14 +187,19 @@ Rectangle {
                 visible: false
                 MyComboBox {
                     id: comboSort
-                    model: [qsTr("Default"), qsTr("Likes"), qsTr("Downloads"), qsTr("Recent")]
+                    model: ListModel {
+                        ListElement { name: qsTr("Default") }
+                        ListElement { name: qsTr("Likes") }
+                        ListElement { name: qsTr("Downloads") }
+                        ListElement { name: qsTr("Recent") }
+                    }
                     currentIndex: ModelList.discoverSort
                     contentItem: Text {
                         anchors.horizontalCenter: parent.horizontalCenter
                         rightPadding: 30
                         color: theme.textColor
                         text: {
-                            return qsTr("Sort by: ") + comboSort.displayText
+                            return qsTr("Sort by: %1").arg(comboSort.displayText)
                         }
                         font.pixelSize: theme.fontSizeLarger
                         verticalAlignment: Text.AlignVCenter
@@ -207,7 +212,10 @@ Rectangle {
                 }
                 MyComboBox {
                     id: comboSortDirection
-                    model: [qsTr("Asc"), qsTr("Desc")]
+                    model: ListModel {
+                        ListElement { name: qsTr("Asc") }
+                        ListElement { name: qsTr("Desc") }
+                    }
                     currentIndex: {
                         if (ModelList.discoverSortDirection === 1)
                             return 0
@@ -219,7 +227,7 @@ Rectangle {
                         rightPadding: 30
                         color: theme.textColor
                         text: {
-                            return qsTr("Sort dir: ") + comboSortDirection.displayText
+                            return qsTr("Sort dir: %1").arg(comboSortDirection.displayText)
                         }
                         font.pixelSize: theme.fontSizeLarger
                         verticalAlignment: Text.AlignVCenter
@@ -235,7 +243,15 @@ Rectangle {
                 }
                 MyComboBox {
                     id: comboLimit
-                    model: ["5", "10", "20", "50", "100", qsTr("None")]
+                    model: ListModel {
+                        ListElement { name: "5" }
+                        ListElement { name: "10" }
+                        ListElement { name: "20" }
+                        ListElement { name: "50" }
+                        ListElement { name: "100" }
+                        ListElement { name: qsTr("None") }
+                    }
+
                     currentIndex: {
                         if (ModelList.discoverLimit === 5)
                             return 0;
@@ -255,7 +271,7 @@ Rectangle {
                         rightPadding: 30
                         color: theme.textColor
                         text: {
-                            return qsTr("Limit: ") + comboLimit.displayText
+                            return qsTr("Limit: %1").arg(comboLimit.displayText)
                         }
                         font.pixelSize: theme.fontSizeLarger
                         verticalAlignment: Text.AlignVCenter
@@ -288,7 +304,7 @@ Rectangle {
             Layout.fillHeight: true
             horizontalAlignment: Qt.AlignHCenter
             verticalAlignment: Qt.AlignVCenter
-            text: qsTr("Network error: could not retrieve http://gpt4all.io/models/models3.json")
+            text: qsTr("Network error: could not retrieve %1").arg("http://gpt4all.io/models/models3.json")
             font.pixelSize: theme.fontSizeLarge
             color: theme.mutedTextColor
         }
@@ -365,7 +381,12 @@ Rectangle {
                                 Accessible.role: Accessible.Paragraph
                                 Accessible.name: qsTr("Description")
                                 Accessible.description: qsTr("File description")
-                                onLinkActivated: Qt.openUrlExternally(link)
+                                onLinkActivated: function(link) { Qt.openUrlExternally(link); }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.NoButton // pass clicks to parent
+                                    cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                }
                             }
 
                             // FIXME Need to overhaul design here which must take into account
@@ -418,7 +439,7 @@ Rectangle {
                                         Layout.minimumWidth: 200
                                         Layout.fillWidth: true
                                         Layout.alignment: Qt.AlignTop | Qt.AlignHCenter
-                                        visible: installed || downloadError !== ""
+                                        visible: !isDownloading && (installed || isIncomplete)
                                         Accessible.description: qsTr("Remove model from filesystem")
                                         onClicked: {
                                             Download.removeModel(filename);
@@ -436,10 +457,35 @@ Rectangle {
                                         text: qsTr("Install")
                                         font.pixelSize: theme.fontSizeLarge
                                         onClicked: {
-                                            if (apiKey.text === "")
+                                            var apiKeyText = apiKey.text.trim(),
+                                                baseUrlText = baseUrl.text.trim(),
+                                                modelNameText = modelName.text.trim();
+
+                                            var apiKeyOk = apiKeyText !== "",
+                                                baseUrlOk = !isCompatibleApi || baseUrlText !== "",
+                                                modelNameOk = !isCompatibleApi || modelNameText !== "";
+
+                                            if (!apiKeyOk)
                                                 apiKey.showError();
+                                            if (!baseUrlOk)
+                                                baseUrl.showError();
+                                            if (!modelNameOk)
+                                                modelName.showError();
+
+                                            if (!apiKeyOk || !baseUrlOk || !modelNameOk)
+                                                return;
+
+                                            if (!isCompatibleApi)
+                                                Download.installModel(
+                                                    filename,
+                                                    apiKeyText,
+                                                );
                                             else
-                                                Download.installModel(filename, apiKey.text);
+                                                Download.installCompatibleModel(
+                                                    modelNameText,
+                                                    apiKeyText,
+                                                    baseUrlText,
+                                                );
                                         }
                                         Accessible.role: Accessible.Button
                                         Accessible.name: qsTr("Install")
@@ -453,9 +499,7 @@ Rectangle {
                                             Layout.leftMargin: 20
                                             visible: downloadError !== ""
                                             textFormat: Text.StyledText
-                                            text: "<strong><font size=\"1\">"
-                                                  + qsTr("<a href=\"#error\">Error</a>")
-                                                  + "</strong></font>"
+                                            text: qsTr("<strong><font size=\"1\"><a href=\"#error\">Error</a></strong></font>")
                                             color: theme.textColor
                                             font.pixelSize: theme.fontSizeLarge
                                             linkColor: theme.textErrorColor
@@ -474,10 +518,7 @@ Rectangle {
                                             Layout.leftMargin: 20
                                             Layout.maximumWidth: 300
                                             textFormat: Text.StyledText
-                                            text: qsTr("<strong><font size=\"2\">WARNING: Not recommended for your hardware.")
-                                                  + qsTr(" Model requires more memory (") + ramrequired
-                                                  + qsTr(" GB) than your system has available (")
-                                                  + LLM.systemTotalRAMInGBString() + ").</strong></font>"
+                                            text: qsTr("<strong><font size=\"2\">WARNING: Not recommended for your hardware. Model requires more memory (%1 GB) than your system has available (%2).</strong></font>").arg(ramrequired).arg(LLM.systemTotalRAMInGBString())
                                             color: theme.textErrorColor
                                             font.pixelSize: theme.fontSizeLarge
                                             wrapMode: Text.WordWrap
@@ -575,12 +616,55 @@ Rectangle {
                                         Layout.alignment: Qt.AlignTop | Qt.AlignHCenter
                                         wrapMode: Text.WrapAnywhere
                                         function showError() {
-                                            apiKey.placeholderTextColor = theme.textErrorColor
+                                            messageToast.show(qsTr("ERROR: $API_KEY is empty."));
+                                            apiKey.placeholderTextColor = theme.textErrorColor;
                                         }
                                         onTextChanged: {
-                                            apiKey.placeholderTextColor = theme.mutedTextColor
+                                            apiKey.placeholderTextColor = theme.mutedTextColor;
                                         }
                                         placeholderText: qsTr("enter $API_KEY")
+                                        Accessible.role: Accessible.EditableText
+                                        Accessible.name: placeholderText
+                                        Accessible.description: qsTr("Whether the file hash is being calculated")
+                                    }
+
+                                    MyTextField {
+                                        id: baseUrl
+                                        visible: !installed && isOnline && isCompatibleApi
+                                        Layout.topMargin: 20
+                                        Layout.leftMargin: 20
+                                        Layout.minimumWidth: 200
+                                        Layout.alignment: Qt.AlignTop | Qt.AlignHCenter
+                                        wrapMode: Text.WrapAnywhere
+                                        function showError() {
+                                            messageToast.show(qsTr("ERROR: $BASE_URL is empty."));
+                                            baseUrl.placeholderTextColor = theme.textErrorColor;
+                                        }
+                                        onTextChanged: {
+                                            baseUrl.placeholderTextColor = theme.mutedTextColor;
+                                        }
+                                        placeholderText: qsTr("enter $BASE_URL")
+                                        Accessible.role: Accessible.EditableText
+                                        Accessible.name: placeholderText
+                                        Accessible.description: qsTr("Whether the file hash is being calculated")
+                                    }
+
+                                    MyTextField {
+                                        id: modelName
+                                        visible: !installed && isOnline && isCompatibleApi
+                                        Layout.topMargin: 20
+                                        Layout.leftMargin: 20
+                                        Layout.minimumWidth: 200
+                                        Layout.alignment: Qt.AlignTop | Qt.AlignHCenter
+                                        wrapMode: Text.WrapAnywhere
+                                        function showError() {
+                                            messageToast.show(qsTr("ERROR: $MODEL_NAME is empty."))
+                                            modelName.placeholderTextColor = theme.textErrorColor;
+                                        }
+                                        onTextChanged: {
+                                            modelName.placeholderTextColor = theme.mutedTextColor;
+                                        }
+                                        placeholderText: qsTr("enter $MODEL_NAME")
                                         Accessible.role: Accessible.EditableText
                                         Accessible.name: placeholderText
                                         Accessible.description: qsTr("Whether the file hash is being calculated")
@@ -629,7 +713,7 @@ Rectangle {
                                         color: theme.mutedDarkTextColor
                                     }
                                     Text {
-                                        text: ramrequired >= 0 ? ramrequired + qsTr(" GB") : "?"
+                                        text: ramrequired >= 0 ? qsTr("%1 GB").arg(ramrequired) : qsTr("?")
                                         color: theme.textColor
                                         font.pixelSize: theme.fontSizeSmall
                                         font.bold: true
@@ -651,7 +735,7 @@ Rectangle {
                                         color: theme.mutedDarkTextColor
                                     }
                                     Text {
-                                        text: parameters !== "" ? parameters : "?"
+                                        text: parameters !== "" ? parameters : qsTr("?")
                                         color: theme.textColor
                                         font.pixelSize: theme.fontSizeSmall
                                         font.bold: true
@@ -720,6 +804,13 @@ Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    Connections {
+        target: Download
+        function onToastMessage(message) {
+            messageToast.show(message);
         }
     }
 }

@@ -196,6 +196,7 @@ public:
         if (item.value != value) {
             item.value = value;
             emit dataChanged(createIndex(index, 0), createIndex(index, 0), {ValueRole});
+            emit valueChanged(index, value);
         }
     }
 
@@ -463,6 +464,7 @@ public:
 
 Q_SIGNALS:
     void countChanged();
+    void valueChanged(int index, const QString &value);
 
 private:
 

@@ -1,5 +1,6 @@
 #include "modellist.h"
 
+#include "download.h"
 #include "mysettings.h"
 #include "network.h"
 
@@ -33,7 +34,6 @@
 #include <QtLogging>
 
 #include <algorithm>
-#include <compare>
 #include <cstddef>
 #include <iterator>
 #include <string>
@@ -334,6 +334,28 @@ void ModelInfo::setSystemPrompt(const QString &p)
     m_systemPrompt = p;
 }
 
+QString ModelInfo::chatNamePrompt() const
+{
+    return MySettings::globalInstance()->modelChatNamePrompt(*this);
+}
+
+void ModelInfo::setChatNamePrompt(const QString &p)
+{
+    if (shouldSaveMetadata()) MySettings::globalInstance()->setModelChatNamePrompt(*this, p, true /*force*/);
+    m_chatNamePrompt = p;
+}
+
+QString ModelInfo::suggestedFollowUpPrompt() const
+{
+    return MySettings::globalInstance()->modelSuggestedFollowUpPrompt(*this);
+}
+
+void ModelInfo::setSuggestedFollowUpPrompt(const QString &p)
+{
+    if (shouldSaveMetadata()) MySettings::globalInstance()->setModelSuggestedFollowUpPrompt(*this, p, true /*force*/);
+    m_suggestedFollowUpPrompt = p;
+}
+
 bool ModelInfo::shouldSaveMetadata() const
 {
     return installed && (isClone() || isDiscovered() || description() == "" /*indicates sideloaded*/);
@@ -364,11 +386,14 @@ QVariantMap ModelInfo::getFields() const
         { "repeatPenaltyTokens", m_repeatPenaltyTokens },
         { "promptTemplate",      m_promptTemplate },
         { "systemPrompt",        m_systemPrompt },
+        { "chatNamePrompt",      m_chatNamePrompt },
+        { "suggestedFollowUpPrompt", m_suggestedFollowUpPrompt },
     };
 }
 
-InstalledModels::InstalledModels(QObject *parent)
+InstalledModels::InstalledModels(QObject *parent, bool selectable)
     : QSortFilterProxyModel(parent)
+    , m_selectable(selectable)
 {
     connect(this, &InstalledModels::rowsInserted, this, &InstalledModels::countChanged);
     connect(this, &InstalledModels::rowsRemoved, this, &InstalledModels::countChanged);
@@ -379,11 +404,15 @@ InstalledModels::InstalledModels(QObject *parent)
 bool InstalledModels::filterAcceptsRow(int sourceRow,
                                        const QModelIndex &sourceParent) const
 {
+    /* TODO(jared): We should list incomplete models alongside installed models on the
+     * Models page. Simply replacing isDownloading with isIncomplete here doesn't work for
+     * some reason - the models show up as something else. */
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
     bool isInstalled = sourceModel()->data(index, ModelList::InstalledRole).toBool();
+    bool isDownloading = sourceModel()->data(index, ModelList::DownloadingRole).toBool();
     bool isEmbeddingModel = sourceModel()->data(index, ModelList::IsEmbeddingModelRole).toBool();
     // list installed chat models
-    return isInstalled && !isEmbeddingModel;
+    return (isInstalled || (!m_selectable && isDownloading)) && !isEmbeddingModel;
 }
 
 DownloadableModels::DownloadableModels(QObject *parent)
@@ -403,11 +432,9 @@ bool DownloadableModels::filterAcceptsRow(int sourceRow,
     // FIXME We can eliminate the 'expanded' code as the UI no longer uses this
     bool withinLimit = sourceRow < (m_expanded ? sourceModel()->rowCount() : m_limit);
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
-    bool isDownloadable = !sourceModel()->data(index, ModelList::DescriptionRole).toString().isEmpty();
-    bool isInstalled = sourceModel()->data(index, ModelList::InstalledRole).toBool();
-    bool isIncomplete = sourceModel()->data(index, ModelList::IncompleteRole).toBool();
+    bool hasDescription = !sourceModel()->data(index, ModelList::DescriptionRole).toString().isEmpty();
     bool isClone = sourceModel()->data(index, ModelList::IsCloneRole).toBool();
-    return withinLimit && !isClone && !isInstalled && (isDownloadable || isIncomplete);
+    return withinLimit && hasDescription && !isClone;
 }
 
 int DownloadableModels::count() const
@@ -446,6 +473,7 @@ ModelList *ModelList::globalInstance()
 ModelList::ModelList()
     : QAbstractListModel(nullptr)
     , m_installedModels(new InstalledModels(this))
+    , m_selectableModels(new InstalledModels(this, /*selectable*/ true))
     , m_downloadableModels(new DownloadableModels(this))
     , m_asyncModelRequestOngoing(false)
     , m_discoverLimit(20)
@@ -455,7 +483,10 @@ ModelList::ModelList()
     , m_discoverResultsCompleted(0)
     , m_discoverInProgress(false)
 {
+    QCoreApplication::instance()->installEventFilter(this);
+
     m_installedModels->setSourceModel(this);
+    m_selectableModels->setSourceModel(this);
     m_downloadableModels->setSourceModel(this);
 
     connect(MySettings::globalInstance(), &MySettings::modelPathChanged, this, &ModelList::updateModelsFromDirectory);
@@ -479,6 +510,26 @@ ModelList::ModelList()
     updateModelsFromJson();
     updateModelsFromSettings();
     updateModelsFromDirectory();
+
+    QCoreApplication::instance()->installEventFilter(this);
+}
+
+QString ModelList::compatibleModelNameHash(QUrl baseUrl, QString modelName) {
+    QCryptographicHash sha256(QCryptographicHash::Sha256);
+    sha256.addData((baseUrl.toString() + "_" + modelName).toUtf8());
+    return sha256.result().toHex();
+};
+
+QString ModelList::compatibleModelFilename(QUrl baseUrl, QString modelName) {
+    QString hash(compatibleModelNameHash(baseUrl, modelName));
+    return QString(u"gpt4all-%1-capi.rmodel"_s).arg(hash);
+};
+
+bool ModelList::eventFilter(QObject *obj, QEvent *ev)
+{
+    if (obj == QCoreApplication::instance() && ev->type() == QEvent::LanguageChange)
+        emit dataChanged(index(0, 0), index(m_models.size() - 1, 0));
+    return false;
 }
 
 QString ModelList::incompleteDownloadPath(const QString &modelFile)
@@ -486,43 +537,15 @@ QString ModelList::incompleteDownloadPath(const QString &modelFile)
     return MySettings::globalInstance()->modelPath() + "incomplete-" + modelFile;
 }
 
-const QList<ModelInfo> ModelList::exportModelList() const
+const QList<ModelInfo> ModelList::selectableModelList() const
 {
+    // FIXME: This needs to be kept in sync with m_selectableModels so should probably be merged
     QMutexLocker locker(&m_mutex);
     QList<ModelInfo> infos;
     for (ModelInfo *info : m_models)
-        if (info->installed)
+        if (info->installed && !info->isEmbeddingModel)
             infos.append(*info);
     return infos;
-}
-
-const QList<QString> ModelList::userDefaultModelList() const
-{
-    QMutexLocker locker(&m_mutex);
-
-    const QString userDefaultModelName = MySettings::globalInstance()->userDefaultModel();
-    QList<QString> models;
-    bool foundUserDefault = false;
-    for (ModelInfo *info : m_models) {
-
-        // Only installed chat models are suitable as a default
-        if (!info->installed || info->isEmbeddingModel)
-            continue;
-
-        if (info->id() == userDefaultModelName) {
-            foundUserDefault = true;
-            models.prepend(info->name());
-        } else {
-            models.append(info->name());
-        }
-    }
-
-    const QString defaultId = "Application default";
-    if (foundUserDefault)
-        models.append(defaultId);
-    else
-        models.prepend(defaultId);
-    return models;
 }
 
 ModelInfo ModelList::defaultModelInfo() const
@@ -641,7 +664,7 @@ void ModelList::addModel(const QString &id)
     m_mutex.unlock();
     endInsertRows();
 
-    emit userDefaultModelListChanged();
+    emit selectableModelListChanged();
 }
 
 void ModelList::changeId(const QString &oldId, const QString &newId)
@@ -691,6 +714,8 @@ QVariant ModelList::dataInternal(const ModelInfo *info, int role) const
             return info->isDefault;
         case OnlineRole:
             return info->isOnline;
+        case CompatibleApiRole:
+            return info->isCompatibleApi;
         case DescriptionRole:
             return info->description();
         case RequiresVersionRole:
@@ -753,6 +778,10 @@ QVariant ModelList::dataInternal(const ModelInfo *info, int role) const
             return info->promptTemplate();
         case SystemPromptRole:
             return info->systemPrompt();
+        case ChatNamePromptRole:
+            return info->chatNamePrompt();
+        case SuggestedFollowUpPromptRole:
+            return info->suggestedFollowUpPrompt();
         case LikesRole:
             return info->likes();
         case DownloadsRole:
@@ -843,6 +872,8 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
                 info->isDefault = value.toBool(); break;
             case OnlineRole:
                 info->isOnline = value.toBool(); break;
+            case CompatibleApiRole:
+                info->isCompatibleApi = value.toBool(); break;
             case DescriptionRole:
                 info->setDescription(value.toString()); break;
             case RequiresVersionRole:
@@ -923,6 +954,10 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
                 info->setPromptTemplate(value.toString()); break;
             case SystemPromptRole:
                 info->setSystemPrompt(value.toString()); break;
+            case ChatNamePromptRole:
+                info->setChatNamePrompt(value.toString()); break;
+            case SuggestedFollowUpPromptRole:
+                info->setSuggestedFollowUpPrompt(value.toString()); break;
             case LikesRole:
                 {
                     if (info->likes() != value.toInt()) {
@@ -975,7 +1010,13 @@ void ModelList::updateData(const QString &id, const QVector<QPair<int, QVariant>
         }
     }
     emit dataChanged(createIndex(index, 0), createIndex(index, 0));
-    emit userDefaultModelListChanged();
+
+    // FIXME(jared): for some reason these don't update correctly when the source model changes, so we explicitly invalidate them
+    m_selectableModels->invalidate();
+    m_installedModels->invalidate();
+    m_downloadableModels->invalidate();
+
+    emit selectableModelListChanged();
 }
 
 void ModelList::resortModel()
@@ -1053,6 +1094,7 @@ QString ModelList::clone(const ModelInfo &model)
         { ModelList::FilenameRole, model.filename() },
         { ModelList::DirpathRole, model.dirpath },
         { ModelList::OnlineRole, model.isOnline },
+        { ModelList::CompatibleApiRole, model.isCompatibleApi },
         { ModelList::IsEmbeddingModelRole, model.isEmbeddingModel },
         { ModelList::TemperatureRole, model.temperature() },
         { ModelList::TopPRole, model.topP() },
@@ -1066,6 +1108,8 @@ QString ModelList::clone(const ModelInfo &model)
         { ModelList::RepeatPenaltyTokensRole, model.repeatPenaltyTokens() },
         { ModelList::PromptTemplateRole, model.promptTemplate() },
         { ModelList::SystemPromptRole, model.systemPrompt() },
+        { ModelList::ChatNamePromptRole, model.chatNamePrompt() },
+        { ModelList::SuggestedFollowUpPromptRole, model.suggestedFollowUpPrompt() },
     };
     updateData(id, data);
     return id;
@@ -1085,7 +1129,7 @@ void ModelList::removeInstalled(const ModelInfo &model)
 {
     Q_ASSERT(model.installed);
     Q_ASSERT(!model.isClone());
-    Q_ASSERT(model.isDiscovered() || model.description() == "" /*indicates sideloaded*/);
+    Q_ASSERT(model.isDiscovered() || model.isCompatibleApi || model.description() == "" /*indicates sideloaded*/);
     removeInternal(model);
     emit layoutChanged();
 }
@@ -1113,7 +1157,7 @@ void ModelList::removeInternal(const ModelInfo &model)
         delete info;
     }
     endRemoveRows();
-    emit userDefaultModelListChanged();
+    emit selectableModelListChanged();
     MySettings::globalInstance()->eraseModel(model);
 }
 
@@ -1232,14 +1276,53 @@ void ModelList::updateModelsFromDirectory()
 
             QFileInfo info = it.fileInfo();
 
+            bool isOnline(filename.endsWith(".rmodel"));
+            bool isCompatibleApi(filename.endsWith("-capi.rmodel"));
+
+            QString name;
+            QString description;
+            if (isCompatibleApi) {
+                QJsonObject obj;
+                {
+                    QFile file(path + filename);
+                    bool success = file.open(QIODeviceBase::ReadOnly);
+                    (void)success;
+                    Q_ASSERT(success);
+                    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+                    obj = doc.object();
+                }
+                {
+                    QString apiKey(obj["apiKey"].toString());
+                    QString baseUrl(obj["baseUrl"].toString());
+                    QString modelName(obj["modelName"].toString());
+                    apiKey = apiKey.length() < 10 ? "*****" : apiKey.left(5) + "*****";
+                    name = tr("%1 (%2)").arg(modelName, baseUrl);
+                    description = tr("<strong>OpenAI-Compatible API Model</strong><br>"
+                                     "<ul><li>API Key: %1</li>"
+                                     "<li>Base URL: %2</li>"
+                                     "<li>Model Name: %3</li></ul>")
+                                        .arg(apiKey, baseUrl, modelName);
+                }
+            }
+
             for (const QString &id : modelsById) {
                 QVector<QPair<int, QVariant>> data {
                     { InstalledRole, true },
                     { FilenameRole, filename },
-                    { OnlineRole, filename.endsWith(".rmodel") },
+                    { OnlineRole, isOnline },
+                    { CompatibleApiRole, isCompatibleApi },
                     { DirpathRole, info.dir().absolutePath() + "/" },
                     { FilesizeRole, toFileSize(info.size()) },
                 };
+                if (isCompatibleApi) {
+                    // The data will be saved to "GPT4All.ini".
+                    data.append({ NameRole, name });
+                    // The description is hard-coded into "GPT4All.ini" due to performance issue.
+                    // If the description goes to be dynamic from its .rmodel file, it will get high I/O usage while using the ModelList.
+                    data.append({ DescriptionRole, description });
+                    // Prompt template should be clear while using ChatML format which is using in most of OpenAI-Compatible API server.
+                    data.append({ PromptTemplateRole, "%1" });
+                }
                 updateData(id, data);
             }
         }
@@ -1359,22 +1442,6 @@ void ModelList::updateDataForSettings()
     emit dataChanged(index(0, 0), index(m_models.size() - 1, 0));
 }
 
-static std::strong_ordering compareVersions(const QString &a, const QString &b)
-{
-    QStringList aParts = a.split('.');
-    QStringList bParts = b.split('.');
-
-    for (int i = 0; i < std::min(aParts.size(), bParts.size()); ++i) {
-        int aInt = aParts[i].toInt();
-        int bInt = bParts[i].toInt();
-        if (auto diff = aInt <=> bInt; diff != 0) {
-            return diff;
-        }
-    }
-
-    return aParts.size() <=> bParts.size();
-}
-
 void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
 {
     QJsonParseError err;
@@ -1426,11 +1493,11 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             continue;
 
         // If the current version is strictly less than required version, then skip
-        if (!requiresVersion.isEmpty() && compareVersions(currentVersion, requiresVersion) < 0)
+        if (!requiresVersion.isEmpty() && Download::compareAppVersions(currentVersion, requiresVersion) < 0)
             continue;
 
         // If the version removed is less than or equal to the current version, then skip
-        if (!versionRemoved.isEmpty() && compareVersions(versionRemoved, currentVersion) <= 0)
+        if (!versionRemoved.isEmpty() && Download::compareAppVersions(versionRemoved, currentVersion) <= 0)
             continue;
 
         modelFilesize = ModelList::toFileSize(modelFilesize.toULongLong());
@@ -1508,7 +1575,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilesizeRole, "minimal" },
             { ModelList::OnlineRole, true },
             { ModelList::DescriptionRole,
-             tr("<strong>OpenAI's ChatGPT model GPT-3.5 Turbo</strong><br>") + chatGPTDesc },
+             tr("<strong>OpenAI's ChatGPT model GPT-3.5 Turbo</strong><br> %1").arg(chatGPTDesc) },
             { ModelList::RequiresVersionRole, "2.7.4" },
             { ModelList::OrderRole, "ca" },
             { ModelList::RamrequiredRole, 0 },
@@ -1536,7 +1603,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilesizeRole, "minimal" },
             { ModelList::OnlineRole, true },
             { ModelList::DescriptionRole,
-             tr("<strong>OpenAI's ChatGPT model GPT-4</strong><br>") + chatGPTDesc + chatGPT4Warn },
+             tr("<strong>OpenAI's ChatGPT model GPT-4</strong><br> %1 %2").arg(chatGPTDesc).arg(chatGPT4Warn) },
             { ModelList::RequiresVersionRole, "2.7.4" },
             { ModelList::OrderRole, "cb" },
             { ModelList::RamrequiredRole, 0 },
@@ -1567,7 +1634,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilesizeRole, "minimal" },
             { ModelList::OnlineRole, true },
             { ModelList::DescriptionRole,
-             tr("<strong>Mistral Tiny model</strong><br>") + mistralDesc },
+             tr("<strong>Mistral Tiny model</strong><br> %1").arg(mistralDesc) },
             { ModelList::RequiresVersionRole, "2.7.4" },
             { ModelList::OrderRole, "cc" },
             { ModelList::RamrequiredRole, 0 },
@@ -1592,7 +1659,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilesizeRole, "minimal" },
             { ModelList::OnlineRole, true },
             { ModelList::DescriptionRole,
-             tr("<strong>Mistral Small model</strong><br>") + mistralDesc },
+             tr("<strong>Mistral Small model</strong><br> %1").arg(mistralDesc) },
             { ModelList::RequiresVersionRole, "2.7.4" },
             { ModelList::OrderRole, "cd" },
             { ModelList::RamrequiredRole, 0 },
@@ -1618,7 +1685,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilesizeRole, "minimal" },
             { ModelList::OnlineRole, true },
             { ModelList::DescriptionRole,
-             tr("<strong>Mistral Medium model</strong><br>") + mistralDesc },
+             tr("<strong>Mistral Medium model</strong><br> %1").arg(mistralDesc) },
             { ModelList::RequiresVersionRole, "2.7.4" },
             { ModelList::OrderRole, "ce" },
             { ModelList::RamrequiredRole, 0 },
@@ -1626,6 +1693,34 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::QuantRole, "NA" },
             { ModelList::TypeRole, "Mistral" },
             { ModelList::UrlRole, "https://api.mistral.ai/v1/chat/completions"},
+        };
+        updateData(id, data);
+    }
+
+    const QString compatibleDesc = tr("<ul><li>Requires personal API key and the API base URL.</li>"
+                                      "<li>WARNING: Will send your chats to "
+                                      "the OpenAI-compatible API Server you specified!</li>"
+                                      "<li>Your API key will be stored on disk</li><li>Will only be used"
+                                      " to communicate with the OpenAI-compatible API Server</li>");
+
+    {
+        const QString modelName = "OpenAI-compatible";
+        const QString id = modelName;
+        if (!contains(id))
+            addModel(id);
+        QVector<QPair<int, QVariant>> data {
+            { ModelList::NameRole, modelName },
+            { ModelList::FilesizeRole, "minimal" },
+            { ModelList::OnlineRole, true },
+            { ModelList::CompatibleApiRole, true },
+            { ModelList::DescriptionRole,
+             tr("<strong>Connect to OpenAI-compatible API server</strong><br> %1").arg(compatibleDesc) },
+            { ModelList::RequiresVersionRole, "2.7.4" },
+            { ModelList::OrderRole, "cf" },
+            { ModelList::RamrequiredRole, 0 },
+            { ModelList::ParametersRole, "?" },
+            { ModelList::QuantRole, "NA" },
+            { ModelList::TypeRole, "NA" },
         };
         updateData(id, data);
     }
@@ -1760,6 +1855,14 @@ void ModelList::updateModelsFromSettings()
         if (settings.contains(g + "/systemPrompt")) {
             const QString systemPrompt = settings.value(g + "/systemPrompt").toString();
             data.append({ ModelList::SystemPromptRole, systemPrompt });
+        }
+        if (settings.contains(g + "/chatNamePrompt")) {
+            const QString chatNamePrompt = settings.value(g + "/chatNamePrompt").toString();
+            data.append({ ModelList::ChatNamePromptRole, chatNamePrompt });
+        }
+        if (settings.contains(g + "/suggestedFollowUpPrompt")) {
+            const QString suggestedFollowUpPrompt = settings.value(g + "/suggestedFollowUpPrompt").toString();
+            data.append({ ModelList::SuggestedFollowUpPromptRole, suggestedFollowUpPrompt });
         }
         updateData(id, data);
     }

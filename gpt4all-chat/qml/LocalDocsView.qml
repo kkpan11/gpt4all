@@ -68,7 +68,7 @@ Rectangle {
 
             MyButton {
                 Layout.alignment: Qt.AlignTop | Qt.AlignRight
-                text: qsTr("\uFF0B Add Doc Collection")
+                text: qsTr("\uFF0B Add Collection")
                 onClicked: {
                     addCollectionViewRequested()
                 }
@@ -82,11 +82,16 @@ Rectangle {
             visible: !LocalDocs.databaseValid
             Text {
                 anchors.centerIn: parent
-                horizontalAlignment: Qt.AlignHCenter
-                text: qsTr("ERROR: The LocalDocs database is not valid.")
+                text: qsTr("<h3>ERROR: The LocalDocs database cannot be accessed or is not valid.</h3><br>"
+                         + "<i>Note: You will need to restart after trying any of the following suggested fixes.</i><br>"
+                         + "<ul><li>Make sure that the folder set as <b>Download Path</b> exists on the file system.</li>"
+                         + "<li>Check ownership as well as read and write permissions of the <b>Download Path</b>.</li>"
+                         + "<li>If there is a <b>localdocs_v2.db</b> file, check its ownership and read/write "
+                         + "permissions, too.</li></ul><br>"
+                         + "If the problem persists and there are any 'localdocs_v*.db' files present, as a last resort you can<br>"
+                         + "try backing them up and removing them. You will have to recreate your collections, however.")
                 color: theme.textErrorColor
-                font.bold: true
-                font.pixelSize: theme.fontSizeLargest
+                font.pixelSize: theme.fontSizeLarger
             }
         }
 
@@ -399,30 +404,35 @@ Rectangle {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 30
-                            Layout.leftMargin: 15
-                            Layout.rightMargin: 15
-                            Layout.topMargin: 15
-                            MyTextButton {
+                            MySettingsButton {
                                 text: qsTr("Remove")
-                                color: theme.red500
-                                onClick: LocalDocs.removeFolder(collection, folder_path)
+                                textColor: theme.red500
+                                onClicked: LocalDocs.removeFolder(collection, folder_path)
+                                backgroundColor: "transparent"
+                                backgroundColorHovered: theme.lighterButtonBackgroundHoveredRed
                             }
                             Item {
                                 Layout.fillWidth: true
                             }
-                            MyTextButton {
+                            MySettingsButton {
+                                id: rebuildButton
                                 visible: !model.forceIndexing && !model.indexing && model.currentEmbeddingsToIndex === 0
                                 text: qsTr("Rebuild")
-                                color: theme.green500
-                                onClick: { LocalDocs.forceRebuildFolder(folder_path); }
-                                tooltip: qsTr("Reindex this folder from scratch. This is slow and usually not needed.")
+                                textColor: theme.green500
+                                onClicked: LocalDocs.forceRebuildFolder(folder_path)
+                                toolTip: qsTr("Reindex this folder from scratch. This is slow and usually not needed.")
+                                backgroundColor: "transparent"
+                                backgroundColorHovered: theme.lighterButtonBackgroundHovered
                             }
-                            MyTextButton {
+                            MySettingsButton {
+                                id: updateButton
                                 visible: model.forceIndexing
                                 text: qsTr("Update")
-                                color: theme.green500
-                                onClick: { LocalDocs.forceIndexing(collection); }
-                                tooltip: qsTr("Update the collection to the new version. This is a slow operation.")
+                                textColor: theme.green500
+                                onClicked: LocalDocs.forceIndexing(collection)
+                                toolTip: qsTr("Update the collection to the new version. This is a slow operation.")
+                                backgroundColor: "transparent"
+                                backgroundColorHovered: theme.lighterButtonBackgroundHovered
                             }
                         }
                     }

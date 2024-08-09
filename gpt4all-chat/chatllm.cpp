@@ -37,7 +37,7 @@ using namespace Qt::Literals::StringLiterals;
 //#define DEBUG
 //#define DEBUG_MODEL_LOADING
 
-#define GPTJ_INTERNAL_STATE_VERSION 0
+#define GPTJ_INTERNAL_STATE_VERSION  0 // GPT-J is gone but old chats still use this
 #define LLAMA_INTERNAL_STATE_VERSION 0
 
 class LLModelStore {
@@ -102,7 +102,7 @@ ChatLLM::ChatLLM(Chat *parent, bool isServer)
     : QObject{nullptr}
     , m_promptResponseTokens(0)
     , m_promptTokens(0)
-    , m_isRecalc(false)
+    , m_restoringFromText(false)
     , m_shouldBeLoaded(false)
     , m_forceUnloadModel(false)
     , m_markedForDeletion(false)
@@ -322,6 +322,7 @@ bool ChatLLM::loadModel(const ModelInfo &modelInfo)
         QVariantMap modelLoadProps;
         if (modelInfo.isOnline) {
             QString apiKey;
+            QString requestUrl;
             QString modelName;
             {
                 QFile file(filePath);
@@ -332,11 +333,24 @@ bool ChatLLM::loadModel(const ModelInfo &modelInfo)
                 QJsonObject obj = doc.object();
                 apiKey = obj["apiKey"].toString();
                 modelName = obj["modelName"].toString();
+                if (modelInfo.isCompatibleApi) {
+                    QString baseUrl(obj["baseUrl"].toString());
+                    QUrl apiUrl(QUrl::fromUserInput(baseUrl));
+                    if (!Network::isHttpUrlValid(apiUrl)) {
+                        return false;
+                    }
+                    QString currentPath(apiUrl.path());
+                    QString suffixPath("%1/chat/completions");
+                    apiUrl.setPath(suffixPath.arg(currentPath));
+                    requestUrl = apiUrl.toString();
+                } else {
+                    requestUrl = modelInfo.url();
+                }
             }
             m_llModelType = LLModelType::API_;
             ChatAPI *model = new ChatAPI();
             model->setModelName(modelName);
-            model->setRequestURL(modelInfo.url());
+            model->setRequestURL(requestUrl);
             model->setAPIKey(apiKey);
             m_llModelInfo.resetModel(this, model);
         } else if (!loadNewModel(modelInfo, modelLoadProps)) {
@@ -550,7 +564,6 @@ bool ChatLLM::loadNewModel(const ModelInfo &modelInfo, QVariantMap &modelLoadPro
 
     switch (m_llModelInfo.model->implementation().modelType()[0]) {
     case 'L': m_llModelType = LLModelType::LLAMA_; break;
-    case 'G': m_llModelType = LLModelType::GPTJ_; break;
     default:
         {
             m_llModelInfo.resetModel(this);
@@ -598,6 +611,7 @@ std::string trim_whitespace(const std::string& input)
     return std::string(first_non_whitespace, last_non_whitespace);
 }
 
+// FIXME(jared): we don't actually have to re-decode the prompt to generate a new response
 void ChatLLM::regenerateResponse()
 {
     // ChatGPT uses a different semantic meaning for n_past than local models. For ChatGPT, the meaning
@@ -698,17 +712,6 @@ bool ChatLLM::handleResponse(int32_t token, const std::string &response)
     return !m_stopGenerating;
 }
 
-bool ChatLLM::handleRecalculate(bool isRecalc)
-{
-#if defined(DEBUG)
-    qDebug() << "recalculate" << m_llmThread.objectName() << isRecalc;
-#endif
-    if (m_isRecalc != isRecalc) {
-        m_isRecalc = isRecalc;
-        emit recalcChanged();
-    }
-    return !m_stopGenerating;
-}
 bool ChatLLM::prompt(const QList<QString> &collectionList, const QString &prompt)
 {
     if (m_restoreStateFromText) {
@@ -750,7 +753,7 @@ bool ChatLLM::promptInternal(const QList<QString> &collectionList, const QString
     if (!databaseResults.isEmpty()) {
         QStringList results;
         for (const ResultInfo &info : databaseResults)
-            results << u"Collection: %1\nPath: %2\nSnippet: %3"_s.arg(info.collection, info.path, info.text);
+            results << u"Collection: %1\nPath: %2\nExcerpt: %3"_s.arg(info.collection, info.path, info.text);
 
         // FIXME(jared): use a Jinja prompt template instead of hardcoded Alpaca-style localdocs template
         docsContext = u"### Context:\n%1\n\n"_s.arg(results.join("\n\n"));
@@ -762,7 +765,6 @@ bool ChatLLM::promptInternal(const QList<QString> &collectionList, const QString
     auto promptFunc = std::bind(&ChatLLM::handlePrompt, this, std::placeholders::_1);
     auto responseFunc = std::bind(&ChatLLM::handleResponse, this, std::placeholders::_1,
         std::placeholders::_2);
-    auto recalcFunc = std::bind(&ChatLLM::handleRecalculate, this, std::placeholders::_1);
     emit promptProcessing();
     m_ctx.n_predict = n_predict;
     m_ctx.top_k = top_k;
@@ -782,10 +784,12 @@ bool ChatLLM::promptInternal(const QList<QString> &collectionList, const QString
     m_timer->start();
     if (!docsContext.isEmpty()) {
         auto old_n_predict = std::exchange(m_ctx.n_predict, 0); // decode localdocs context without a response
-        m_llModelInfo.model->prompt(docsContext.toStdString(), "%1", promptFunc, responseFunc, recalcFunc, m_ctx);
+        m_llModelInfo.model->prompt(docsContext.toStdString(), "%1", promptFunc, responseFunc,
+                                    /*allowContextShift*/ true, m_ctx);
         m_ctx.n_predict = old_n_predict; // now we are ready for a response
     }
-    m_llModelInfo.model->prompt(prompt.toStdString(), promptTemplate.toStdString(), promptFunc, responseFunc, recalcFunc, m_ctx);
+    m_llModelInfo.model->prompt(prompt.toStdString(), promptTemplate.toStdString(), promptFunc, responseFunc,
+                                /*allowContextShift*/ true, m_ctx);
 #if defined(DEBUG)
     printf("\n");
     fflush(stdout);
@@ -797,7 +801,13 @@ bool ChatLLM::promptInternal(const QList<QString> &collectionList, const QString
         m_response = trimmed;
         emit responseChanged(QString::fromStdString(m_response));
     }
-    emit responseStopped(elapsed);
+
+    SuggestionMode mode = MySettings::globalInstance()->suggestionMode();
+    if (mode == SuggestionMode::On || (!databaseResults.isEmpty() && mode == SuggestionMode::LocalDocsOnly))
+        generateQuestions(elapsed);
+    else
+        emit responseStopped(elapsed);
+
     m_pristineLoadedState = false;
     return true;
 }
@@ -875,13 +885,18 @@ void ChatLLM::generateName()
     if (!isModelLoaded())
         return;
 
+    const QString chatNamePrompt = MySettings::globalInstance()->modelChatNamePrompt(m_modelInfo);
+    if (chatNamePrompt.trimmed().isEmpty()) {
+        qWarning() << "ChatLLM: not generating chat name because prompt is empty";
+        return;
+    }
+
     auto promptTemplate = MySettings::globalInstance()->modelPromptTemplate(m_modelInfo);
     auto promptFunc = std::bind(&ChatLLM::handleNamePrompt, this, std::placeholders::_1);
     auto responseFunc = std::bind(&ChatLLM::handleNameResponse, this, std::placeholders::_1, std::placeholders::_2);
-    auto recalcFunc = std::bind(&ChatLLM::handleNameRecalculate, this, std::placeholders::_1);
     LLModel::PromptContext ctx = m_ctx;
-    m_llModelInfo.model->prompt("Describe the above conversation in seven words or less.",
-                                promptTemplate.toStdString(), promptFunc, responseFunc, recalcFunc, ctx);
+    m_llModelInfo.model->prompt(chatNamePrompt.toStdString(), promptTemplate.toStdString(),
+                                promptFunc, responseFunc, /*allowContextShift*/ false, ctx);
     std::string trimmed = trim_whitespace(m_nameResponse);
     if (trimmed != m_nameResponse) {
         m_nameResponse = trimmed;
@@ -901,7 +916,6 @@ bool ChatLLM::handleNamePrompt(int32_t token)
     qDebug() << "name prompt" << m_llmThread.objectName() << token;
 #endif
     Q_UNUSED(token);
-    qt_noop();
     return !m_stopGenerating;
 }
 
@@ -919,15 +933,72 @@ bool ChatLLM::handleNameResponse(int32_t token, const std::string &response)
     return words.size() <= 3;
 }
 
-bool ChatLLM::handleNameRecalculate(bool isRecalc)
+bool ChatLLM::handleQuestionPrompt(int32_t token)
 {
 #if defined(DEBUG)
-    qDebug() << "name recalc" << m_llmThread.objectName() << isRecalc;
+    qDebug() << "question prompt" << m_llmThread.objectName() << token;
 #endif
-    Q_UNUSED(isRecalc);
-    qt_noop();
+    Q_UNUSED(token);
+    return !m_stopGenerating;
+}
+
+bool ChatLLM::handleQuestionResponse(int32_t token, const std::string &response)
+{
+#if defined(DEBUG)
+    qDebug() << "question response" << m_llmThread.objectName() << token << response;
+#endif
+    Q_UNUSED(token);
+
+    // add token to buffer
+    m_questionResponse.append(response);
+
+    // match whole question sentences
+    // FIXME: This only works with response by the model in english which is not ideal for a multi-language
+    // model.
+    static const QRegularExpression reQuestion(R"(\b(What|Where|How|Why|When|Who|Which|Whose|Whom)\b[^?]*\?)");
+
+    // extract all questions from response
+    int lastMatchEnd = -1;
+    for (const auto &match : reQuestion.globalMatch(m_questionResponse)) {
+        lastMatchEnd = match.capturedEnd();
+        emit generatedQuestionFinished(match.captured());
+    }
+
+    // remove processed input from buffer
+    if (lastMatchEnd != -1)
+        m_questionResponse.erase(m_questionResponse.cbegin(), m_questionResponse.cbegin() + lastMatchEnd);
+
     return true;
 }
+
+void ChatLLM::generateQuestions(qint64 elapsed)
+{
+    Q_ASSERT(isModelLoaded());
+    if (!isModelLoaded()) {
+        emit responseStopped(elapsed);
+        return;
+    }
+
+    const std::string suggestedFollowUpPrompt = MySettings::globalInstance()->modelSuggestedFollowUpPrompt(m_modelInfo).toStdString();
+    if (QString::fromStdString(suggestedFollowUpPrompt).trimmed().isEmpty()) {
+        emit responseStopped(elapsed);
+        return;
+    }
+
+    emit generatingQuestions();
+    m_questionResponse.clear();
+    auto promptTemplate = MySettings::globalInstance()->modelPromptTemplate(m_modelInfo);
+    auto promptFunc = std::bind(&ChatLLM::handleQuestionPrompt, this, std::placeholders::_1);
+    auto responseFunc = std::bind(&ChatLLM::handleQuestionResponse, this, std::placeholders::_1, std::placeholders::_2);
+    LLModel::PromptContext ctx = m_ctx;
+    QElapsedTimer totalTime;
+    totalTime.start();
+    m_llModelInfo.model->prompt(suggestedFollowUpPrompt, promptTemplate.toStdString(), promptFunc, responseFunc,
+                                /*allowContextShift*/ false, ctx);
+    elapsed += totalTime.elapsed();
+    emit responseStopped(elapsed);
+}
+
 
 bool ChatLLM::handleSystemPrompt(int32_t token)
 {
@@ -938,15 +1009,6 @@ bool ChatLLM::handleSystemPrompt(int32_t token)
     return !m_stopGenerating;
 }
 
-bool ChatLLM::handleSystemRecalculate(bool isRecalc)
-{
-#if defined(DEBUG)
-    qDebug() << "system recalc" << m_llmThread.objectName() << isRecalc;
-#endif
-    Q_UNUSED(isRecalc);
-    return false;
-}
-
 bool ChatLLM::handleRestoreStateFromTextPrompt(int32_t token)
 {
 #if defined(DEBUG)
@@ -954,15 +1016,6 @@ bool ChatLLM::handleRestoreStateFromTextPrompt(int32_t token)
 #endif
     Q_UNUSED(token);
     return !m_stopGenerating;
-}
-
-bool ChatLLM::handleRestoreStateFromTextRecalculate(bool isRecalc)
-{
-#if defined(DEBUG)
-    qDebug() << "restore state from text recalc" << m_llmThread.objectName() << isRecalc;
-#endif
-    Q_UNUSED(isRecalc);
-    return false;
 }
 
 // this function serialized the cached model state to disk.
@@ -996,8 +1049,6 @@ bool ChatLLM::serialize(QDataStream &stream, int version, bool serializeKV)
     if (version >= 7) {
         stream << m_ctx.n_ctx;
     }
-    stream << quint64(m_ctx.logits.size());
-    stream.writeRawData(reinterpret_cast<const char*>(m_ctx.logits.data()), m_ctx.logits.size() * sizeof(float));
     stream << quint64(m_ctx.tokens.size());
     stream.writeRawData(reinterpret_cast<const char*>(m_ctx.tokens.data()), m_ctx.tokens.size() * sizeof(int));
     saveState();
@@ -1054,12 +1105,9 @@ bool ChatLLM::deserialize(QDataStream &stream, int version, bool deserializeKV, 
         if (!discardKV) m_ctx.n_ctx = n_ctx;
     }
 
-    quint64 logitsSize;
-    stream >> logitsSize;
-    if (!discardKV) {
-        m_ctx.logits.resize(logitsSize);
-        stream.readRawData(reinterpret_cast<char*>(m_ctx.logits.data()), logitsSize * sizeof(float));
-    } else {
+    if (version < 9) {
+        quint64 logitsSize;
+        stream >> logitsSize;
         stream.skipRawData(logitsSize * sizeof(float));
     }
 
@@ -1172,7 +1220,6 @@ void ChatLLM::processSystemPrompt()
     m_ctx = LLModel::PromptContext();
 
     auto promptFunc = std::bind(&ChatLLM::handleSystemPrompt, this, std::placeholders::_1);
-    auto recalcFunc = std::bind(&ChatLLM::handleSystemRecalculate, this, std::placeholders::_1);
 
     const int32_t n_predict = MySettings::globalInstance()->modelMaxLength(m_modelInfo);
     const int32_t top_k = MySettings::globalInstance()->modelTopK(m_modelInfo);
@@ -1198,7 +1245,7 @@ void ChatLLM::processSystemPrompt()
 #endif
     auto old_n_predict = std::exchange(m_ctx.n_predict, 0); // decode system prompt without a response
     // use "%1%2" and not "%1" to avoid implicit whitespace
-    m_llModelInfo.model->prompt(systemPrompt, "%1%2", promptFunc, nullptr, recalcFunc, m_ctx, true);
+    m_llModelInfo.model->prompt(systemPrompt, "%1%2", promptFunc, nullptr, /*allowContextShift*/ true, m_ctx, true);
     m_ctx.n_predict = old_n_predict;
 #if defined(DEBUG)
     printf("\n");
@@ -1215,14 +1262,13 @@ void ChatLLM::processRestoreStateFromText()
     if (!isModelLoaded() || !m_restoreStateFromText || m_isServer)
         return;
 
-    m_isRecalc = true;
-    emit recalcChanged();
+    m_restoringFromText = true;
+    emit restoringFromTextChanged();
 
     m_stopGenerating = false;
     m_ctx = LLModel::PromptContext();
 
     auto promptFunc = std::bind(&ChatLLM::handleRestoreStateFromTextPrompt, this, std::placeholders::_1);
-    auto recalcFunc = std::bind(&ChatLLM::handleRestoreStateFromTextRecalculate, this, std::placeholders::_1);
 
     const QString promptTemplate = MySettings::globalInstance()->modelPromptTemplate(m_modelInfo);
     const int32_t n_predict = MySettings::globalInstance()->modelMaxLength(m_modelInfo);
@@ -1255,7 +1301,7 @@ void ChatLLM::processRestoreStateFromText()
         auto responseText = response.second.toStdString();
 
         m_llModelInfo.model->prompt(prompt.second.toStdString(), promptTemplate.toStdString(), promptFunc, nullptr,
-                                    recalcFunc, m_ctx, false, &responseText);
+                                    /*allowContextShift*/ true, m_ctx, false, &responseText);
     }
 
     if (!m_stopGenerating) {
@@ -1263,8 +1309,8 @@ void ChatLLM::processRestoreStateFromText()
         m_stateFromText.clear();
     }
 
-    m_isRecalc = false;
-    emit recalcChanged();
+    m_restoringFromText = false;
+    emit restoringFromTextChanged();
 
     m_pristineLoadedState = false;
 }

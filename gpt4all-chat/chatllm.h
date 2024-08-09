@@ -28,10 +28,12 @@ using namespace Qt::Literals::StringLiterals;
 
 class QDataStream;
 
+// NOTE: values serialized to disk, do not change or reuse
 enum LLModelType {
-    GPTJ_,
-    LLAMA_,
-    API_,
+    GPTJ_  = 0, // no longer used
+    LLAMA_ = 1,
+    API_   = 2,
+    BERT_  = 3, // no longer used
 };
 
 class ChatLLM;
@@ -91,7 +93,7 @@ class Chat;
 class ChatLLM : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(bool isRecalc READ isRecalc NOTIFY recalcChanged)
+    Q_PROPERTY(bool restoringFromText READ restoringFromText NOTIFY restoringFromTextChanged)
     Q_PROPERTY(QString deviceBackend READ deviceBackend NOTIFY loadedModelInfoChanged)
     Q_PROPERTY(QString device READ device NOTIFY loadedModelInfoChanged)
     Q_PROPERTY(QString fallbackReason READ fallbackReason NOTIFY loadedModelInfoChanged)
@@ -119,7 +121,7 @@ public:
     ModelInfo modelInfo() const;
     void setModelInfo(const ModelInfo &info);
 
-    bool isRecalc() const { return m_isRecalc; }
+    bool restoringFromText() const { return m_restoringFromText; }
 
     void acquireModel();
     void resetModel();
@@ -160,6 +162,7 @@ public Q_SLOTS:
     void unloadModel();
     void reloadModel();
     void generateName();
+    void generateQuestions(qint64 elapsed);
     void handleChatIdChanged(const QString &id);
     void handleShouldBeLoadedChanged();
     void handleThreadStarted();
@@ -169,15 +172,17 @@ public Q_SLOTS:
     void processRestoreStateFromText();
 
 Q_SIGNALS:
-    void recalcChanged();
+    void restoringFromTextChanged();
     void loadedModelInfoChanged();
     void modelLoadingPercentageChanged(float);
     void modelLoadingError(const QString &error);
     void modelLoadingWarning(const QString &warning);
     void responseChanged(const QString &response);
     void promptProcessing();
+    void generatingQuestions();
     void responseStopped(qint64 promptResponseMs);
     void generatedNameChanged(const QString &name);
+    void generatedQuestionFinished(const QString &generatedQuestion);
     void stateChanged();
     void threadStarted();
     void shouldBeLoadedChanged();
@@ -196,16 +201,14 @@ protected:
         int32_t repeat_penalty_tokens);
     bool handlePrompt(int32_t token);
     bool handleResponse(int32_t token, const std::string &response);
-    bool handleRecalculate(bool isRecalc);
     bool handleNamePrompt(int32_t token);
     bool handleNameResponse(int32_t token, const std::string &response);
-    bool handleNameRecalculate(bool isRecalc);
     bool handleSystemPrompt(int32_t token);
     bool handleSystemResponse(int32_t token, const std::string &response);
-    bool handleSystemRecalculate(bool isRecalc);
     bool handleRestoreStateFromTextPrompt(int32_t token);
     bool handleRestoreStateFromTextResponse(int32_t token, const std::string &response);
-    bool handleRestoreStateFromTextRecalculate(bool isRecalc);
+    bool handleQuestionPrompt(int32_t token);
+    bool handleQuestionResponse(int32_t token, const std::string &response);
     void saveState();
     void restoreState();
 
@@ -219,6 +222,7 @@ private:
 
     std::string m_response;
     std::string m_nameResponse;
+    QString m_questionResponse;
     LLModelInfo m_llModelInfo;
     LLModelType m_llModelType;
     ModelInfo m_modelInfo;
@@ -227,7 +231,7 @@ private:
     QThread m_llmThread;
     std::atomic<bool> m_stopGenerating;
     std::atomic<bool> m_shouldBeLoaded;
-    std::atomic<bool> m_isRecalc;
+    std::atomic<bool> m_restoringFromText; // status indication
     std::atomic<bool> m_forceUnloadModel;
     std::atomic<bool> m_markedForDeletion;
     bool m_isServer;
